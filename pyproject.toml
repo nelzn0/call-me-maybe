@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "accelerate>=1.15.0",
     "llm-sdk",
     "numpy>=2.5.3",
     "pydantic>=2.13.5",
