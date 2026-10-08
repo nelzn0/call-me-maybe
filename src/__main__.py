@@ -71,6 +71,9 @@ def is_json_complete(text: str) -> bool:
         return False
 
 
+def get_valid_tokens_for_current_state(text: str, func_defs: list[FunctionDefinition], llm_model: Small_LLM_Model) -> list[int]:
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Call Me Maybe - Function Calling Constraining")
 
@@ -112,6 +115,13 @@ Response: """
     while True:
         full_context = input_ids + output_ids
         logits = llm_model.get_logits_from_input_ids(full_context)
+
+        valid_tokens =
+
+        for i in range(len(logits)):
+            if i not in valid_tokens:
+                logits[i] = -float('inf')
+
         best_token_id = np.argmax(logits)
         output_ids.append(best_token_id)
 
