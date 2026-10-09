@@ -58,9 +58,9 @@ def generate(args: str) -> None:
 
     llm_model = Small_LLM_Model()
 
-    para = {}
     functions = ""
     for f in func_defs:
+        para = {}
         for param_name, param_type in f.parameters.items():
             para[param_name] = param_type.type
 
@@ -72,52 +72,55 @@ def generate(args: str) -> None:
 
         """
 
-    input1 = inputs[1]
+    final_result = []
 
-    prompt = f"""You have access to the following function:
+    for current_input in inputs:
 
-    Avaliable functions:
+        prompt = f"""You have access to the following function:
 
-    {functions}
+        Avaliable functions:
 
-    Given the user's question, respond with a JSON object specifying which
-    function to call an with what parameters.
+        {functions}
 
-    User question: {input1.prompt}
+        Given the user's question, respond with a JSON object specifying which
+        function to call an with what parameters.
 
-    Respond ONLY with a JSON object in this format:
-    {{"name": "function_name", "parameters": {{...}}}}
+        User question: {current_input.prompt}
 
-    Response: """
+        Respond ONLY with a JSON object in this format:
+        {{"name": "function_name", "parameters": {{...}}}}
 
-    print("starting generation")
+        Response: """
 
-    encoded = llm_model.encode(prompt)
-    input_ids = encoded[0].tolist()
-    output_ids = []
-    max_tokens = 30
+        print("starting generation")
 
-    for i in range(max_tokens):
-        full_context = input_ids + output_ids
-        logits = llm_model.get_logits_from_input_ids(full_context)
+        encoded = llm_model.encode(prompt)
+        input_ids = encoded[0].tolist()
+        output_ids = []
+        max_tokens = 200
 
-        generated_text = llm_model.decode(output_ids)
+        for i in range(max_tokens):
+            full_context = input_ids + output_ids
+            logits = llm_model.get_logits_from_input_ids(full_context)
 
-        print(f"Generated text: {generated_text}")
+            generated_text = llm_model.decode(output_ids)
 
-        valid_tokens = get_valid_tokens_for_current_state(generated_text, func_defs, llm_model)
+            valid_tokens = get_valid_tokens_for_current_state(generated_text, func_defs, llm_model)
 
-        if valid_tokens is not None:
-            # block invalid tokens
-            for j in range(len(logits)):
-                if j not in valid_tokens:
-                    logits[j] = -float('inf')
+            if valid_tokens is not None:
+                # block invalid tokens
+                for j in range(len(logits)):
+                    if j not in valid_tokens:
+                        logits[j] = -float('inf')
 
-        best_token_id = np.argmax(logits)
-        output_ids.append(best_token_id)
+            best_token_id = np.argmax(logits)
+            output_ids.append(best_token_id)
 
-        if is_json_complete(generated_text):
-            break
+            generated_text = llm_model.decode(output_ids)
+
+            if is_json_complete(generated_text):
+                final_result.append(generated_text)
+                break
 
     print("FInal result")
-    print(generated_text)
+    print(final_result)
