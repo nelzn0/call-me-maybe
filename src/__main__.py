@@ -71,7 +71,53 @@ def is_json_complete(text: str) -> bool:
         return False
 
 
-def get_valid_tokens_for_current_state(text: str, func_defs: list[FunctionDefinition], llm_model: Small_LLM_Model) -> list[int]:
+def get_valid_tokens_for_current_state(text: str, func_defs: list[FunctionDefinition], llm_model: Small_LLM_Model) -> list[int] | None:
+
+    next_tokens = []
+
+    # 1: Check if we're currently generating a function name,
+    # generate if text contains '{"name": '"
+    if '{"name": "' in text:
+        # 2: Extract the partial function name, find where it starts after name:
+        start = text.index('{"name": "') + len('{"name": "')
+
+        # Get everything after the start position, partial name generated so far
+        current_name = text[start:]
+
+        if '"' in current_name:
+            return None
+
+        # list of all function names in func_defs objects
+        function_names = [func.name for func in func_defs]
+
+        # find matches
+        matches = [name for name in function_names if name.startswith(current_name)]
+
+        # 4: Find the next valid character for each match
+        # for each match, look at character that comes right after current_name
+
+        next_chars = []
+
+        for match in matches:
+            if len(match) > len(current_name):
+                # is there a char after the current position
+                next_char = match[len(current_name)]
+                next_chars.append(next_char)
+            else:
+                # if its finished, add the closing '"'
+                next_chars.append('"')
+
+        # remove duplicates
+        next_chars = list(set(next_chars))
+
+        # 5: convert chars to token IDs
+        for c in next_chars:
+            token_id = llm_model.encode(c)
+            next_tokens += token_id[0].tolist()
+
+        return next_tokens
+
+    return None
 
 
 def main() -> None:
@@ -89,14 +135,27 @@ def main() -> None:
 
     llm_model = Small_LLM_Model()
 
-    func1 = func_defs[1]
+    para = {}
+    functions = ""
+    for f in func_defs:
+        for param_name, param_type in f.parameters.items():
+            para[param_name] = param_type.type
+
+        functions += f"""
+
+        Function name: {f.name}
+        Description: {f.description}
+        Parameters: {json.dumps(para)}
+
+        """
+
     input1 = inputs[1]
 
     prompt = f"""You have access to the following function:
 
-    Function: {func1.name}
-    Description: {func1.description}
-    Parameters: {func1.parameters}
+    Avaliable functions:
+
+    {functions}
 
     Given the user's question, respond with a JSON object specifying which
     function to call an with what parameters.
@@ -106,30 +165,44 @@ def main() -> None:
     Respond ONLY with a JSON object in this format:
     {{"name": "function_name", "parameters": {{...}}}}
 
-Response: """
+    Response: """
+
+    print("starting generation")
 
     encoded = llm_model.encode(prompt)
     input_ids = encoded[0].tolist()
     output_ids = []
+    max_tokens = 30
 
-    while True:
+    for i in range(max_tokens):
+
+        print(f"iteration {i}")
+
         full_context = input_ids + output_ids
         logits = llm_model.get_logits_from_input_ids(full_context)
 
-        valid_tokens =
+        generated_text = llm_model.decode(output_ids)
 
-        for i in range(len(logits)):
-            if i not in valid_tokens:
-                logits[i] = -float('inf')
+        print(f"Generated text: {generated_text}")
+
+        valid_tokens = get_valid_tokens_for_current_state(generated_text, func_defs, llm_model)
+
+        print(f"Valid tokens: {valid_tokens}")
+
+        if valid_tokens is not None:
+            # block invalid tokens
+            for j in range(len(logits)):
+                if j not in valid_tokens:
+                    logits[j] = -float('inf')
 
         best_token_id = np.argmax(logits)
         output_ids.append(best_token_id)
 
-        generated_text = llm_model.decode(output_ids)
-        print(generated_text)
-
         if is_json_complete(generated_text):
             break
+
+    print("FInal result")
+    print(generated_text)
 
 
 if __name__ == "__main__":
