@@ -4,6 +4,7 @@ from call_me_maybe.models import FunctionDefinition, TestPrompt
 from pydantic import BaseModel, ValidationError
 from llm_sdk import Small_LLM_Model
 from call_me_maybe.decoder import get_valid_next_tokens, get_valid_tokens_for_current_state, extract_value_after_pattern, is_json_complete
+import argparse
 
 
 def load_json_data(file_path: str, model_class: type[BaseModel]) -> list[BaseModel]:
@@ -51,7 +52,7 @@ def load_json_data(file_path: str, model_class: type[BaseModel]) -> list[BaseMod
         return json_data
 
 
-def generate(args: str) -> None:
+def generate(args: argparse.Namespace) -> None:
     func_defs = load_json_data(args.functions_definition, FunctionDefinition)
 
     inputs = load_json_data(args.input, TestPrompt)
@@ -117,6 +118,7 @@ def generate(args: str) -> None:
             output_ids.append(best_token_id)
 
             generated_text = llm_model.decode(output_ids)
+            print(generated_text)
 
             if is_json_complete(generated_text):
                 final_result.append(generated_text)

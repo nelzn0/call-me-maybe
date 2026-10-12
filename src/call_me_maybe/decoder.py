@@ -29,14 +29,15 @@ def extract_value_after_pattern(text: str, pattern: str, stop_chars: list[str]) 
         end_pos = float('inf')
         found = False
         for c in stop_chars:
-            pos = text.find(c, start_pos)
+            pos = text.rfind(c, start_pos)
             if pos != -1:
                 found = True
                 if pos < end_pos:
                     end_pos = pos
 
         if not found:
-            return None
+            end_pos = len(text)
+            return text[start_pos:end_pos]
 
         # extract the value (from start to the first stop character)
         extracted = text[start_pos:end_pos]
@@ -111,9 +112,9 @@ def get_valid_tokens_for_current_state(text: str, func_defs: list[FunctionDefini
     # extract the function name being generated (or the complete one)
     function_extract = extract_value_after_pattern(text, '{"name": "', ['"'])
 
-    # if function name hasn't started yet, return None
+    # if function name hasn't started yet, return it
     if function_extract is None:
-        return None
+        return get_valid_next_tokens(text, ['{"name": "'], llm_model)
 
     # find where the function name value starts
     name_start_pos = text.find('{"name": "')
@@ -136,20 +137,74 @@ def get_valid_tokens_for_current_state(text: str, func_defs: list[FunctionDefini
             return None
 
         else:
-            # get the parameter names for the chosen function
-            param_names = list(chosen_func.parameters.keys())
+            if '"parameters": {"' in text:
+                # get the parameter names for the chosen function
+                param_names = list(chosen_func.parameters.keys())
 
-            # extract the parameter name being generated
-            param_extract = extract_value_after_pattern(text, '"parameters": {', ['},'])
+                start = text.index('"parameters": {"') + len('"parameters": {"')
 
-            if param_extract is None:
-                return None
+                if ',' in text[start:]:
+                    param_pattern = ', "'
+                else:
+                    param_pattern = '"parameters": {"'
 
-            # constrain to valid parameter names
-            next_tokens = get_valid_next_tokens(param_extract, param_names, llm_model)
+                    # extract the parameter name being generated
+                param_extract = extract_value_after_pattern(text, param_pattern, ['"'])
+
+                if text.endswith('"') and param_extract != "":
+                    next_tokens = llm_model.encode(':')[0].tolist()
+
+                elif text.endswith(':') or text.endswith(': '):
+                    for n in "0123456789- ":
+                        next_tokens.extend(llm_model.encode(n)[0].tolist())
+
+                elif text[-1].isdigit():
+                    next_tokens = llm_model.encode(',')[0].tolist()
+
+                elif text.endswith(","):
+                    next_tokens.extend(llm_model.encode(' ')[0].tolist())
+                    next_tokens.extend(llm_model.encode(' "')[0].tolist())
+                    next_tokens.extend(llm_model.encode('"')[0].tolist())
+                elif text.endswith(", "):
+                    next_tokens = llm_model.encode('"')[0].tolist()
+                else:
+                    # constrain to valid parameter names
+                    next_tokens = get_valid_next_tokens(param_extract, param_names, llm_model)
+
+            elif text.endswith('{'):
+                next_tokens = llm_model.encode('"')[0].tolist()
+
+            elif ', "' in text or ',"' in text:
+
+                if text.endswith('"parameters"'):
+                    next_tokens = llm_model.encode(':')[0].tolist()
+                elif text.endswith('"parameters":'):
+                    next_tokens.extend(llm_model.encode(' ')[0].tolist())
+                    next_tokens.extend(llm_model.encode('{')[0].tolist())
+                elif text.endswith('"parameters": '):
+                    next_tokens = llm_model.encode('{')[0].tolist()
+                else:
+
+                    param_key_extract = extract_value_after_pattern(text, ', "', ['"'])
+
+                    if param_key_extract is None:
+                        param_key_extract = extract_value_after_pattern(text, ',"', ['"'])
+
+                    next_tokens = get_valid_next_tokens(param_key_extract, ["parameters"], llm_model)
+
+            else:
+                if text.endswith(","):
+                    next_tokens.extend(llm_model.encode(' ')[0].tolist())
+                    next_tokens.extend(llm_model.encode(' "')[0].tolist())
+                    next_tokens.extend(llm_model.encode('"')[0].tolist())
+                elif text.endswith(", "):
+                    next_tokens = llm_model.encode('"')[0].tolist()
+                else:
+                    next_tokens = llm_model.encode(',')[0].tolist()
 
     else:
         # STATE 1: still generating function name
+
         next_tokens = get_valid_next_tokens(function_extract, func_names, llm_model)
 
     return next_tokens
