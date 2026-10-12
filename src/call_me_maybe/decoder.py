@@ -112,7 +112,7 @@ def get_valid_tokens_for_current_state(text: str, func_defs: list[FunctionDefini
     # extract the function name being generated (or the complete one)
     function_extract = extract_value_after_pattern(text, '{"name": "', ['"'])
 
-    # if function name hasn't started yet, return it
+    # STATE 0: nothing generated yet, force the output to begin with {"name": "
     if function_extract is None:
         return get_valid_next_tokens(text, ['{"name": "'], llm_model)
 
@@ -137,10 +137,12 @@ def get_valid_tokens_for_current_state(text: str, func_defs: list[FunctionDefini
             return None
 
         else:
+            # inside the parameters object: names and number values
             if '"parameters": {"' in text:
                 # get the parameter names for the chosen function
                 param_names = list(chosen_func.parameters.keys())
 
+                # later parameters start with ', "', the first one with '"parameters": {"'
                 start = text.index('"parameters": {"') + len('"parameters": {"')
 
                 if ',' in text[start:]:
@@ -148,19 +150,24 @@ def get_valid_tokens_for_current_state(text: str, func_defs: list[FunctionDefini
                 else:
                     param_pattern = '"parameters": {"'
 
-                    # extract the parameter name being generated
+                # extract the parameter name being generated
                 param_extract = extract_value_after_pattern(text, param_pattern, ['"'])
 
+                # name closed, colon next
                 if text.endswith('"') and param_extract != "":
                     next_tokens = llm_model.encode(':')[0].tolist()
 
+                # after the colon: allow a space or a number to start the value
                 elif text.endswith(':') or text.endswith(': '):
                     for n in "0123456789- ":
                         next_tokens.extend(llm_model.encode(n)[0].tolist())
 
+                # inside a number: more digits, or a comma or } to end it
                 elif text[-1].isdigit():
-                    next_tokens = llm_model.encode(',')[0].tolist()
+                    for n in "0123456789,}":
+                        next_tokens.extend(llm_model.encode(n)[0].tolist())
 
+                # after the comma: allow the next parameter name to start
                 elif text.endswith(","):
                     next_tokens.extend(llm_model.encode(' ')[0].tolist())
                     next_tokens.extend(llm_model.encode(' "')[0].tolist())
@@ -168,16 +175,20 @@ def get_valid_tokens_for_current_state(text: str, func_defs: list[FunctionDefini
                 elif text.endswith(", "):
                     next_tokens = llm_model.encode('"')[0].tolist()
                 else:
-                    # constrain to valid parameter names
+                    # keep only the valid parameter names
                     next_tokens = get_valid_next_tokens(param_extract, param_names, llm_model)
 
+            # object just opened, quote next
             elif text.endswith('{'):
                 next_tokens = llm_model.encode('"')[0].tolist()
 
+            # STATE 2b: the parameters key is being typed, constrain it to "parameters"
             elif ', "' in text or ',"' in text:
 
+                # the key is closed: allow the colon
                 if text.endswith('"parameters"'):
                     next_tokens = llm_model.encode(':')[0].tolist()
+                # after the colon: allow a space or the opening brace
                 elif text.endswith('"parameters":'):
                     next_tokens.extend(llm_model.encode(' ')[0].tolist())
                     next_tokens.extend(llm_model.encode('{')[0].tolist())
@@ -193,6 +204,7 @@ def get_valid_tokens_for_current_state(text: str, func_defs: list[FunctionDefini
                     next_tokens = get_valid_next_tokens(param_key_extract, ["parameters"], llm_model)
 
             else:
+                # name done, comma next
                 if text.endswith(","):
                     next_tokens.extend(llm_model.encode(' ')[0].tolist())
                     next_tokens.extend(llm_model.encode(' "')[0].tolist())
