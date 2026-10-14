@@ -90,13 +90,12 @@ The state is decided from the end of the text and from a few key patterns:
 5. **After the key:** a colon, then a space or `{`, then `{`.
 6. **Parameter names:** the letters of the valid parameter names for the
    chosen function. Once a name is closed, a colon is allowed.
-7. **Parameter values:** for numbers, digits and `-` after the colon, then
-   more digits, a comma, or `}` to end the value. Inside a string, the text
-   is limited to letters, digits, punctuation, and spaces. Strings can't be
-   opened yet.
+7. **Parameter values:** the parameter's type comes from the schema. `number` allows digits and `-` after the colon, then more digits, `,`, or `}`. `string` allows `"` after the colon to open the value. Inside the string, the allowed tokens come from the precomputed vocabulary list. After the closing `"`, only `,` or `}` is allowed.
 
 The first parameter name is found after `"parameters": {"`. Later parameter
 names are found after `, "`, using the last occurrence.
+
+Before generation, `get_vocabulary()` builds a set of token IDs whose text uses only allowed characters, once per run. The `Ġ` marker becomes a space before the check.
 
 ### Token Extraction
 
@@ -150,6 +149,11 @@ Used Pydantic models to validate input JSON files at load time. This catches mal
 
 Implemented the constrained decoding as a state machine to make the logic explicit and maintainable. Each state has clear entry/exit conditions and defines which tokens are valid.
 
+## Known Limitations
+
+- Function selection is not reliable for every prompt (for example, "Reverse the string" and "square root" get `fn_add_numbers`). The final choice is the model's.
+- Escape sequences are not supported. Backslashes are removed from string content.
+
 ## Performance Analysis
 
 [TODO: Add performance metrics after completing the implementation]
@@ -171,17 +175,11 @@ Implemented the constrained decoding as a state machine to make the logic explic
 
 **Solution**: Implemented token-level comparison by encoding each candidate option and comparing token sequences, ensuring we constrain at the right granularity.
 
-### State Detection
-
-**Problem**: Needed to reliably detect which JSON field was being generated from partial text.
-
-**Solution**: Used pattern matching with `extract_value_after_pattern()` to identify the current state based on structural markers in the generated text.
-
 ### Parameter Type Constraints
 
-**Problem**: Different parameters have different types (number vs string), requiring different validation rules.
+**Problem**: Different parameters have different types, and the first version allowed number tokens after every colon, so string values never opened.
 
-**Solution**: The current parameter name is extracted from the text, and the decoder allows number tokens after the colon. Inside a value string, the decoder allows letters, digits, punctuation, and spaces. [TODO: Look up the parameter type from the schema to choose between number and string rules. A `"` after the colon is not allowed yet, so string values never open. In the test run, `Greet shrek` produced number values for a string parameter.]
+**Solution**: The decoder reads the parameter's type from the schema. The `number` lane allows digits and `-`. The `string` lane allows `"` to open the value, then uses the vocabulary list.
 
 ### Escapes and Quotes
 
@@ -191,19 +189,17 @@ Implemented the constrained decoding as a state machine to make the logic explic
 
 ### Multi-Character Tokens
 
-**Problem**: The masks are built from single characters, but the tokenizer can produce tokens that span several characters. In the test run, the model generated names like `n1` that the per-character name check should have blocked.
+**Problem**: The masks were built one character at a time, but tokens like `hunter` span several characters, so the model could only produce single letters in strings (`"s"` instead of `"shrek"`).
 
-**Solution**: [TODO: Build the allowed tokens from the vocabulary, keeping every token whose text uses only allowed characters, instead of encoding one character at a time.]
+**Solution**: Build the allowed token list from the vocabulary, keeping every token whose text uses only allowed characters.
 
 ## Testing Strategy
 
-[TODO: Describe testing approach after completing implementation]
-
 - Helper checks: `is_escaped_quote()` on `"a\"b"`, `"a\\"b"`, and `"a\\\"b"` returns `True`, `False`, and `True` at the quote positions. `is_in_string()` on `"parameters": {"name": "` returns `True`, and on `"a\"b"` returns `False`.
 - Single-prompt run: `one_prompt.json` produces a valid result for `What is the sum of 2 and 3?`.
-- Full run: `function_calling_tests.json` is run end to end, and the output is checked for valid JSON and the correct function name. String-parameter prompts currently fail, as described under Parameter Type Constraints.
+- Full run: string values such as `"shrek"` and `"john"` are complete. Known gap: function choice is wrong for several prompts.
 - Validation of output JSON structure using Python's json module.
-- Edge case testing (empty strings, large numbers, special characters).
+- Edge case testing (TO-DO)
 
 ## Example Usage
 
@@ -222,4 +218,23 @@ Output for the prompt "What is the sum of 2 and 3?" (from `data/output/function_
 ]
 ```
 
-[TODO: Add a run with multiple prompts, and string-parameter prompts such as "Greet shrek", once string values are implemented]
+Output for the prompt "Greet shrek" and "Greet john" (from `data/output/function_calling_results.json`):
+
+```json
+[
+  {
+    "prompt": "Greet shrek",
+    "name": "fn_greet",
+    "parameters": {
+      "name": "shrek"
+    }
+  },
+  {
+    "prompt": "Greet john",
+    "name": "fn_greet",
+    "parameters": {
+      "name": "john"
+    }
+  },
+]
+```

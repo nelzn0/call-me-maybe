@@ -6,6 +6,7 @@ from llm_sdk import Small_LLM_Model
 from call_me_maybe.decoder import get_valid_next_tokens, get_valid_tokens_for_current_state, extract_value_after_pattern, is_json_complete
 import argparse
 import os
+import string
 
 
 def load_json_data(file_path: str, model_class: type[BaseModel]) -> list[BaseModel]:
@@ -53,12 +54,60 @@ def load_json_data(file_path: str, model_class: type[BaseModel]) -> list[BaseMod
         return json_data
 
 
+def get_vocabulary(allowed_chars: str, llm_model: Small_LLM_Model) -> list[int]:
+    """Builds the list of token IDs whose text only uses allowed characters.
+
+    Reads the vocabulary file from the model, turns the Ġ space marker into
+    a real space, and keeps every token where all characters are allowed.
+
+    Args:
+        allowed_chars: The characters a token's text is allowed to use
+        llm_model: The LLM model, used to find the vocabulary file
+
+    Returns:
+        A list of token IDs that can be used inside a string value
+    """
+
+    vocab = llm_model.get_path_to_vocab_file()
+
+    with open(vocab) as f:
+
+        vocab_dict = json.load(f)
+
+        valid_chars = []
+
+        for k in vocab_dict:
+            converted_text = k.replace("Ġ", " ")
+            valid = True
+            for c in converted_text:
+                if c not in allowed_chars:
+                    valid = False
+            if valid:
+                valid_chars.append(vocab_dict[k])
+
+    return valid_chars
+
+
 def generate(args: argparse.Namespace) -> None:
+    """Generates a function call for each prompt and writes the results to a file.
+
+    Builds the vocabulary once, then for each prompt masks the logits so only
+    valid tokens can be picked, until the JSON object is complete.
+
+    Args:
+        args: The parsed command-line arguments (file paths)
+    """
     func_defs = load_json_data(args.functions_definition, FunctionDefinition)
 
     inputs = load_json_data(args.input, TestPrompt)
 
     llm_model = Small_LLM_Model()
+
+    allowed_chars = string.ascii_letters + string.punctuation + ' ' + string.digits
+    allow_char_temp = allowed_chars.replace('\\', '')
+
+    # builds the vocab list once, before the prompt loop
+    vocab = set(get_vocabulary(allow_char_temp, llm_model))
 
     functions = ""
     for f in func_defs:
@@ -80,12 +129,12 @@ def generate(args: argparse.Namespace) -> None:
 
         prompt = f"""You have access to the following function:
 
-        Avaliable functions:
+        Available functions:
 
         {functions}
 
         Given the user's question, respond with a JSON object specifying which
-        function to call an with what parameters.
+        function to call and with what parameters.
 
         User question: {current_input.prompt}
 
@@ -107,7 +156,8 @@ def generate(args: argparse.Namespace) -> None:
 
             generated_text = llm_model.decode(output_ids)
 
-            valid_tokens = get_valid_tokens_for_current_state(generated_text, func_defs, llm_model)
+            # valid tokens depend on the JSON generated so far
+            valid_tokens = get_valid_tokens_for_current_state(generated_text, func_defs, llm_model, vocab)
 
             if valid_tokens is not None:
                 # block invalid tokens
