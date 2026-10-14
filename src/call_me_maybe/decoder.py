@@ -1,9 +1,10 @@
 
 from llm_sdk import Small_LLM_Model
 from call_me_maybe.models import FunctionDefinition, TestPrompt
+import string
 
 
-def extract_value_after_pattern(text: str, pattern: str, stop_chars: list[str]) -> str | None:
+def extract_value_after_pattern(text: str, pattern: str, stop_chars: list[str], first: bool = True) -> str | None:
     """Gets a value from the text that comes after a pattern.
 
     Finds where the pattern shows up in the text, then grabs everything
@@ -13,23 +14,28 @@ def extract_value_after_pattern(text: str, pattern: str, stop_chars: list[str]) 
         text: The JSON text we're working with
         pattern: What we're looking for (like '"name": "')
         stop_chars: Characters that tell us when to stop (like ['"', ',', '}'])
+        first: if True, use the first occurrence of the pattern, otherwise the last one
 
     Returns:
-        The value we extracted if we found the pattern, or None if we couldn't
-        find it or hit a stop character.
+        The value we extracted, or None if the pattern isn't in the text.
+        If there's no stop character, we return everything up to the end.
     """
     extracted = ""
 
     if pattern in text:
         # find where the value starts (right after the pattern)
-        start_pos = text.index(pattern) + len(pattern)
+        # if first, get the first position, otherwise, the last
+        if first:
+            start_pos = text.find(pattern) + len(pattern)
+        else:
+            start_pos = text.rfind(pattern) + len(pattern)
 
         # start with infinity so any real position will be smaller
         # find the earliest stop character position
         end_pos = float('inf')
         found = False
         for c in stop_chars:
-            pos = text.rfind(c, start_pos)
+            pos = text.find(c, start_pos)
             if pos != -1:
                 found = True
                 if pos < end_pos:
@@ -88,11 +94,61 @@ def get_valid_next_tokens(generated_so_far: str, options: list[str], llm_model: 
     return next_tokens
 
 
+def is_escaped_quote(text: str, pos: int) -> bool:
+    """Checks if the quote at pos is escaped by an odd number of backslashes.
+
+    Walks left from pos and flips a flag for each backslash.
+
+    Args:
+        text: The JSON text we're working with
+        pos: The index of the quote we want to check
+
+    Returns:
+        True if the quote is escaped, False otherwise
+    """
+    is_backslash = False
+    i = pos - 1
+
+    while i >= 0 and text[i] == "\\":
+        is_backslash = not is_backslash
+        i -= 1
+
+    return is_backslash
+
+
+def is_in_string(text: str) -> bool:
+    """Checks if the end of the text is inside a string.
+
+    Counts the quotes that aren't escaped. An odd count means the last
+    quote opened a string.
+
+    Args:
+        text: The JSON text generated so far
+
+    Returns:
+        True if we're inside a string, False otherwise
+    """
+    search_pos = 0
+    quote_finder = text.find('"')
+    quote_count = 0
+
+    while quote_finder != -1:
+        # escaped quotes don't open or close a string
+        if not is_escaped_quote(text, quote_finder):
+            quote_count += 1
+
+        search_pos = quote_finder + 1
+        quote_finder = text.find('"', search_pos)
+
+    return quote_count % 2 > 0
+
+
 def get_valid_tokens_for_current_state(text: str, func_defs: list[FunctionDefinition], llm_model: Small_LLM_Model) -> list[int] | None:
     """Figures out what tokens are valid right now based on where we are in the JSON.
 
-    Works like a state machine - first we constrain the function name, then once that's
-    done, we switch to constraining the parameter names for whatever function was chosen.
+    First we constrain the function name, then the parameter names for the
+    chosen function, then the parameter values. Strings are handled with
+    is_in_string.
 
     Args:
         text: The JSON text we've generated so far
@@ -100,8 +156,8 @@ def get_valid_tokens_for_current_state(text: str, func_defs: list[FunctionDefini
         llm_model: The LLM model we use to encode chars into token IDs
 
     Returns:
-        A list of valid token IDs for the current state, or None if we haven't
-        started generating anything yet or something's missing.
+        A list of valid token IDs for the current state, or None if the
+        chosen function isn't in func_defs.
     """
 
     next_tokens = []
@@ -137,7 +193,7 @@ def get_valid_tokens_for_current_state(text: str, func_defs: list[FunctionDefini
             return None
 
         else:
-            # inside the parameters object: names and number values
+            # inside the parameters object: names, number values and string values
             if '"parameters": {"' in text:
                 # get the parameter names for the chosen function
                 param_names = list(chosen_func.parameters.keys())
@@ -151,29 +207,41 @@ def get_valid_tokens_for_current_state(text: str, func_defs: list[FunctionDefini
                     param_pattern = '"parameters": {"'
 
                 # extract the parameter name being generated
-                param_extract = extract_value_after_pattern(text, param_pattern, ['"'])
+                # False = last occurrence, since the parameter being typed is the newest one
+                param_extract = extract_value_after_pattern(text, param_pattern, ['"'], False)
 
-                # name closed, colon next
-                if text.endswith('"') and param_extract != "":
+                # name closed (outside a string), ':' next
+                if text.endswith('"') and param_extract != "" and not is_in_string(text):
                     next_tokens = llm_model.encode(':')[0].tolist()
 
-                # after the colon: allow a space or a number to start the value
+                # after the ':': allow a space or a number to start the value. strings are not opened yet
                 elif text.endswith(':') or text.endswith(': '):
                     for n in "0123456789- ":
                         next_tokens.extend(llm_model.encode(n)[0].tolist())
 
-                # inside a number: more digits, or a comma or } to end it
+                # inside a string: text and punctuation. this is before the digit branch so digits in a string aren't treated as numbers
+                # backslash is removed for now, escapes are not supported yet (TO DO)
+                elif is_in_string(text):
+                    allowed_chars = string.ascii_letters + string.punctuation + ' ' + string.digits
+                    allow_char_temp = allowed_chars.replace('\\', '')
+                    for c in allow_char_temp:
+                        next_tokens.extend(llm_model.encode(c)[0].tolist())
+
+                # inside a number (outside a string): more digits, or ',' or } to end it
                 elif text[-1].isdigit():
                     for n in "0123456789,}":
                         next_tokens.extend(llm_model.encode(n)[0].tolist())
 
-                # after the comma: allow the next parameter name to start
-                elif text.endswith(","):
+                # after the comma (outside a string): allow the next parameter name to start
+                elif text.endswith(",") and not is_in_string(text):
                     next_tokens.extend(llm_model.encode(' ')[0].tolist())
                     next_tokens.extend(llm_model.encode(' "')[0].tolist())
                     next_tokens.extend(llm_model.encode('"')[0].tolist())
-                elif text.endswith(", "):
+                elif text.endswith(", ") and not is_in_string(text):
                     next_tokens = llm_model.encode('"')[0].tolist()
+                # parameters object just closed: } is the only valid token
+                elif text.endswith("}") and not is_in_string(text):
+                    next_tokens = llm_model.encode('}')[0].tolist()
                 else:
                     # keep only the valid parameter names
                     next_tokens = get_valid_next_tokens(param_extract, param_names, llm_model)

@@ -19,7 +19,7 @@ The project demonstrates how constrained decoding can make small language models
 uv sync
 ```
 
-This installs all dependencies including numpy, pydantic, torch, transformers, and huggingface-hub.
+This installs numpy, pydantic, accelerate, and llm-sdk. llm-sdk brings in torch, transformers, and huggingface-hub.
 
 ### Running the Program
 
@@ -30,7 +30,7 @@ uv run python -m src [--functions_definition <file>] [--input <file>] [--output 
 **Default paths:**
 - Functions definition: `data/input/functions_definition.json`
 - Input prompts: `data/input/function_calling_tests.json`
-- Output results: `data/output/function_calls.json`
+- Output results: `data/output/function_calling_results.json`
 
 ### Example
 
@@ -38,7 +38,7 @@ uv run python -m src [--functions_definition <file>] [--input <file>] [--output 
 uv run python -m src \
   --functions_definition data/input/functions_definition.json \
   --input data/input/function_calling_tests.json \
-  --output data/output/function_calls.json
+  --output data/output/function_calling_results.json
 ```
 
 ## Resources
@@ -91,7 +91,9 @@ The state is decided from the end of the text and from a few key patterns:
 6. **Parameter names:** the letters of the valid parameter names for the
    chosen function. Once a name is closed, a colon is allowed.
 7. **Parameter values:** for numbers, digits and `-` after the colon, then
-   more digits, a comma, or `}` to end the value.
+   more digits, a comma, or `}` to end the value. Inside a string, the text
+   is limited to letters, digits, punctuation, and spaces. Strings can't be
+   opened yet.
 
 The first parameter name is found after `"parameters": {"`. Later parameter
 names are found after `, "`, using the last occurrence.
@@ -115,6 +117,14 @@ The `get_valid_next_tokens()` function:
 - Returns the token IDs that could continue any matching option
 
 This ensures the model can only generate tokens that lead to valid JSON structure and schema compliance.
+
+### Escapes and Strings
+
+A quote inside a value is only a boundary if it isn't escaped. `is_escaped_quote()`
+walks left from a quote and counts the backslashes directly in front of it. An odd
+count means the quote is escaped. `is_in_string()` counts the unescaped quotes in
+the text, and an odd total means the text ends inside a string.
+
 
 ## Design Decisions
 
@@ -171,27 +181,45 @@ Implemented the constrained decoding as a state machine to make the logic explic
 
 **Problem**: Different parameters have different types (number vs string), requiring different validation rules.
 
-**Solution**: [TODO: Currently being implemented - need to track current parameter name and look up its type from the schema]
+**Solution**: The current parameter name is extracted from the text, and the decoder allows number tokens after the colon. Inside a value string, the decoder allows letters, digits, punctuation, and spaces. [TODO: Look up the parameter type from the schema to choose between number and string rules. A `"` after the colon is not allowed yet, so string values never open. In the test run, `Greet shrek` produced number values for a string parameter.]
+
+### Escapes and Quotes
+
+**Problem**: A `"` can open a value, close a value, or be part of the content of a value, and a backslash can turn a quote into content. Counting quotes alone gives the wrong answer when escaped quotes are present.
+
+**Solution**: `is_escaped_quote()` walks left from a quote and checks whether an odd number of backslashes precedes it. `is_in_string()` counts only the unescaped quotes, so an odd total means the text ends inside a string. Backslashes are currently removed from string content, so escape sequences are not supported yet.
+
+### Multi-Character Tokens
+
+**Problem**: The masks are built from single characters, but the tokenizer can produce tokens that span several characters. In the test run, the model generated names like `n1` that the per-character name check should have blocked.
+
+**Solution**: [TODO: Build the allowed tokens from the vocabulary, keeping every token whose text uses only allowed characters, instead of encoding one character at a time.]
 
 ## Testing Strategy
 
 [TODO: Describe testing approach after completing implementation]
 
-- Manual testing with provided example prompts
-- Validation of output JSON structure using Python's json module
-- Comparison of generated function calls against expected outputs
-- Edge case testing (empty strings, large numbers, special characters)
+- Helper checks: `is_escaped_quote()` on `"a\"b"`, `"a\\"b"`, and `"a\\\"b"` returns `True`, `False`, and `True` at the quote positions. `is_in_string()` on `"parameters": {"name": "` returns `True`, and on `"a\"b"` returns `False`.
+- Single-prompt run: `one_prompt.json` produces a valid result for `What is the sum of 2 and 3?`.
+- Full run: `function_calling_tests.json` is run end to end, and the output is checked for valid JSON and the correct function name. String-parameter prompts currently fail, as described under Parameter Type Constraints.
+- Validation of output JSON structure using Python's json module.
+- Edge case testing (empty strings, large numbers, special characters).
 
 ## Example Usage
 
-[TODO: Add example output after completing implementation]
+Output for the prompt "What is the sum of 2 and 3?" (from `data/output/function_calling_results.json`):
 
-```bash
-$ uv run python -m src
-
-Starting generation for prompt: "What is the sum of 2 and 3?"
-Generated: {"name": "fn_add_numbers", "parameters": {"a": 2, "b": 3}}
-
-Starting generation for prompt: "Greet shrek"
-Generated: {"name": "fn_greet", "parameters": {"name": "shrek"}}
+```json
+[
+  {
+    "prompt": "What is the sum of 2 and 3?",
+    "name": "fn_add_numbers",
+    "parameters": {
+      "a": 2,
+      "b": 3
+    }
+  }
+]
 ```
+
+[TODO: Add a run with multiple prompts, and string-parameter prompts such as "Greet shrek", once string values are implemented]
