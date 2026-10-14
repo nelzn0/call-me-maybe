@@ -5,6 +5,7 @@ from pydantic import BaseModel, ValidationError
 from llm_sdk import Small_LLM_Model
 from call_me_maybe.decoder import get_valid_next_tokens, get_valid_tokens_for_current_state, extract_value_after_pattern, is_json_complete
 import argparse
+import os
 
 
 def load_json_data(file_path: str, model_class: type[BaseModel]) -> list[BaseModel]:
@@ -121,8 +122,18 @@ def generate(args: argparse.Namespace) -> None:
             print(generated_text)
 
             if is_json_complete(generated_text):
-                final_result.append(generated_text)
+                entry = {}
+                entry["prompt"] = current_input.prompt
+                parsed_result = json.loads(generated_text)
+                entry.update(parsed_result)
+                final_result.append(entry)
                 break
+
+    if os.path.dirname(args.output) != "":
+        os.makedirs(os.path.dirname(args.output), exist_ok=True)
+
+    with open(args.output, "w") as f:
+        json.dump(final_result, f, indent=2)
 
     print("FInal result")
     print(final_result)
