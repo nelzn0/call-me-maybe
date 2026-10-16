@@ -3,7 +3,7 @@ import numpy as np
 from call_me_maybe.models import FunctionDefinition, TestPrompt
 from pydantic import BaseModel, ValidationError
 from llm_sdk import Small_LLM_Model
-from call_me_maybe.decoder import get_valid_next_tokens, get_valid_tokens_for_current_state, extract_value_after_pattern, is_json_complete
+from call_me_maybe.decoder import get_valid_tokens_for_current_state, is_json_complete
 import argparse
 import os
 import string
@@ -138,12 +138,10 @@ def generate(args: argparse.Namespace) -> None:
 
         User question: {current_input.prompt}
 
-        Respond ONLY with a JSON object in this format:
+        Respond ONLY with a JSON object in this format using the appropriate function to the users question:
         {{"name": "function_name", "parameters": {{...}}}}
 
         Response: """
-
-        print("starting generation")
 
         encoded = llm_model.encode(prompt)
         input_ids = encoded[0].tolist()
@@ -161,6 +159,8 @@ def generate(args: argparse.Namespace) -> None:
 
             if valid_tokens is not None:
                 # block invalid tokens
+                if isinstance(valid_tokens, list):
+                    valid_tokens = set(valid_tokens)
                 for j in range(len(logits)):
                     if j not in valid_tokens:
                         logits[j] = -float('inf')
@@ -169,7 +169,6 @@ def generate(args: argparse.Namespace) -> None:
             output_ids.append(best_token_id)
 
             generated_text = llm_model.decode(output_ids)
-            print(generated_text)
 
             if is_json_complete(generated_text):
                 entry = {}
@@ -184,6 +183,3 @@ def generate(args: argparse.Namespace) -> None:
 
     with open(args.output, "w") as f:
         json.dump(final_result, f, indent=2)
-
-    print("FInal result")
-    print(final_result)

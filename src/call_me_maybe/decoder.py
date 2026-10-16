@@ -1,6 +1,69 @@
 
 from llm_sdk import Small_LLM_Model
 from call_me_maybe.models import FunctionDefinition
+from enum import Enum, auto
+from string import digits
+
+
+class State(Enum):
+    P_OPEN = auto()
+    P_NEXT = auto()
+    P_NAME = auto()
+    P_COLON = auto()
+    P_AFTER_VALUE = auto()
+    P_CLOSE = auto()
+    STR_OPEN = auto()
+    IN_STRING = auto()
+    NUM_START = auto()
+    NUM_NEGATIVE = auto()
+    NUM_INT = auto()
+    NUM_DECIMAL_POINT = auto()
+    NUM_DECIMAL = auto()
+    DONE = auto()
+
+
+TRANSITIONS: dict[State, dict[str, State]] = {
+    State.P_OPEN: {'"': State.P_NAME},
+    State.P_NEXT: {' ': State.P_NEXT, '"': State.P_NAME},
+    State.P_NAME: {'"': State.P_COLON},
+    State.P_COLON: {},
+    State.P_AFTER_VALUE: {',': State.P_NEXT, '}': State.P_CLOSE},
+    State.P_CLOSE: {'}': State.DONE},
+    State.STR_OPEN: {'"': State.IN_STRING, " ": State.STR_OPEN},
+    State.IN_STRING: {'"': State.P_AFTER_VALUE},
+    State.NUM_START: {'-': State.NUM_NEGATIVE},
+    State.NUM_NEGATIVE: {},
+    State.NUM_INT: {'.': State.NUM_DECIMAL_POINT, ',': State.P_NEXT, '}': State.P_CLOSE},
+    State.NUM_DECIMAL_POINT: {},
+    State.NUM_DECIMAL: {',': State.P_NEXT, '}': State.P_CLOSE},
+}
+
+
+def next_state(state: State, char: str, generated_so_far: str, options: list[str]) -> State | None:
+
+    if char in TRANSITIONS.get(state, {}):
+        return TRANSITIONS[state][char]
+
+    if state in (State.NUM_START, State.NUM_NEGATIVE, State.NUM_INT) and char in digits:
+        return State.NUM_INT
+    if state in (State.NUM_DECIMAL_POINT, State.NUM_DECIMAL) and char in digits:
+        return State.NUM_DECIMAL
+
+    if state == State.P_NAME and any(char for opts in options if opts.startswith(generated_so_far + char)):
+        return State.P_NAME
+    if state == State.P_NAME and char == '"' and generated_so_far in options:
+        return State.P_COLON
+
+    return None
+
+
+def walk_token(state: State, token_text: str) -> State | None:
+    if state is None:
+        return None
+
+
+def allowed_tokens(state: State, vocab: dict[str, int]) -> set[int]:
+    pass
 
 
 def extract_value_after_pattern(text: str, pattern: str, stop_chars: list[str], first: bool = True) -> str | None:
