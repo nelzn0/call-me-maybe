@@ -5,7 +5,13 @@ from pydantic import BaseModel, ValidationError
 from llm_sdk import Small_LLM_Model
 import argparse
 import os
-from call_me_maybe.decoder import State, allowed_tokens, walk_token, extract_value_after_pattern, is_json_complete, allow_char_temp
+from call_me_maybe.decoder import (
+    State, allowed_tokens, walk_token,
+    extract_value_after_pattern, is_json_complete, allow_char_temp
+)
+
+
+MAX_TOKENS = 200
 
 
 def load_json_data(file_path: str, model_class: type[BaseModel]) -> list[BaseModel]:
@@ -95,6 +101,68 @@ def find_function(func_defs: list[FunctionDefinition], text: str) -> FunctionDef
     return None
 
 
+def build_functions_text(func_defs: list[FunctionDefinition]) -> str:
+    functions = ""
+    for f in func_defs:
+        para = {}
+        for param_name, param_type in f.parameters.items():
+            para[param_name] = param_type.type
+
+        functions += f"""
+
+Function name: {f.name}
+Description: {f.description}
+Parameters: {json.dumps(para)}
+
+"""
+
+    return functions
+
+
+def build_prompt(functions_text: str, user_prompt: str) -> str:
+
+    prompt = f"""You have access to the following functions:
+
+Available functions:
+
+{functions_text}
+
+Given the user's question, respond with a JSON object specifying which
+function to call and with what parameters.
+
+User question: {user_prompt}
+
+Respond ONLY with a JSON object in this format using the appropriate function to the users question:
+{{"name": "function_name", "parameters": {{...}}}}
+
+Response: """
+
+    return prompt
+
+
+def invert_vocab(vocab: dict[str, int]) -> dict[int, str]:
+
+    vocab_invert = {token_id: text for text, token_id in vocab.items()}
+
+    return vocab_invert
+
+
+def mask_logits(logits: list[float], valid_tokens: set[int]) -> list[float]:
+    for j in range(len(logits)):
+        if j not in valid_tokens:
+            logits[j] = -float('inf')
+
+    return logits
+
+
+def write_result(path: str, results: list[dict]) -> None:
+    if os.path.dirname(path) != "":
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    with open(path, "w") as f:
+        json.dump(results, f, indent=2)
+
+
 def generate(args: argparse.Namespace) -> None:
     """Generates a function call for each prompt and writes the results to a file.
 
@@ -112,42 +180,16 @@ def generate(args: argparse.Namespace) -> None:
 
     # builds the vocab list once, before the prompt loop
     vocab = get_vocabulary(allow_char_temp, llm_model)
-    vocab_invert = {token_id: text for text, token_id in vocab.items()}
+    vocab_invert = invert_vocab(vocab)
 
-    functions = ""
-    for f in func_defs:
-        para = {}
-        for param_name, param_type in f.parameters.items():
-            para[param_name] = param_type.type
-
-        functions += f"""
-
-        Function name: {f.name}
-        Description: {f.description}
-        Parameters: {json.dumps(para)}
-
-        """
+    functions = build_functions_text(func_defs)
 
     final_result = []
 
     try:
         for current_input in inputs:
 
-            prompt = f"""You have access to the following function:
-
-            Available functions:
-
-            {functions}
-
-            Given the user's question, respond with a JSON object specifying which
-            function to call and with what parameters.
-
-            User question: {current_input.prompt}
-
-            Respond ONLY with a JSON object in this format using the appropriate function to the users question:
-            {{"name": "function_name", "parameters": {{...}}}}
-
-            Response: """
+            prompt = build_prompt(functions, current_input.prompt)
 
             encoded = llm_model.encode(prompt)
             input_ids = encoded[0].tolist()
@@ -158,9 +200,8 @@ def generate(args: argparse.Namespace) -> None:
             state = State.F_START
             param_type = None
             name_start_state = None
-            max_tokens = 200
 
-            for _ in range(max_tokens):
+            for _ in range(MAX_TOKENS):
                 full_context = input_ids + output_ids
                 logits = llm_model.get_logits_from_input_ids(full_context)
 
@@ -172,9 +213,7 @@ def generate(args: argparse.Namespace) -> None:
                 if not valid_tokens:
                     raise ValueError("No valid tokens found")
 
-                for j in range(len(logits)):
-                    if j not in valid_tokens:
-                        logits[j] = -float('inf')
+                logits = mask_logits(logits, valid_tokens)
 
                 best_token_id = np.argmax(logits)
                 chosen_text = vocab_invert[best_token_id]
@@ -212,8 +251,4 @@ def generate(args: argparse.Namespace) -> None:
     except ValueError as e:
         print(e)
 
-    if os.path.dirname(args.output) != "":
-        os.makedirs(os.path.dirname(args.output), exist_ok=True)
-
-    with open(args.output, "w") as f:
-        json.dump(final_result, f, indent=2)
+    write_result(args.output, final_result)
