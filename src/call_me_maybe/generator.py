@@ -54,8 +54,9 @@ def load_json_data(file_path: str, model_class: type[BaseModel]) -> list[BaseMod
         return json_data
 
 
-def get_vocabulary(allowed_chars: str, llm_model: Small_LLM_Model) -> list[int]:
-    """Builds the list of token IDs whose text only uses allowed characters.
+def get_vocabulary(allowed_chars: str, llm_model: Small_LLM_Model) -> dict[str, int]:
+    """Builds a dict of token text to token ID,
+    for tokens whose text only uses allowed characters.
 
     Reads the vocabulary file from the model, turns the Ġ space marker into
     a real space, and keeps every token where all characters are allowed.
@@ -65,7 +66,7 @@ def get_vocabulary(allowed_chars: str, llm_model: Small_LLM_Model) -> list[int]:
         llm_model: The LLM model, used to find the vocabulary file
 
     Returns:
-        A list of token IDs that can be used inside a string value
+        A dict of the text with its corresponding ID
     """
 
     vocab = llm_model.get_path_to_vocab_file()
@@ -74,7 +75,7 @@ def get_vocabulary(allowed_chars: str, llm_model: Small_LLM_Model) -> list[int]:
 
         vocab_dict = json.load(f)
 
-        valid_chars = []
+        valid_chars = {}
 
         for k in vocab_dict:
             converted_text = k.replace("Ġ", " ")
@@ -83,7 +84,7 @@ def get_vocabulary(allowed_chars: str, llm_model: Small_LLM_Model) -> list[int]:
                 if c not in allowed_chars:
                     valid = False
             if valid:
-                valid_chars.append(vocab_dict[k])
+                valid_chars[converted_text] = vocab_dict[k]
 
     return valid_chars
 
@@ -105,6 +106,7 @@ def generate(args: argparse.Namespace) -> None:
 
     allowed_chars = string.ascii_letters + string.punctuation + ' ' + string.digits
     allow_char_temp = allowed_chars.replace('\\', '')
+    allowed_in_string = allow_char_temp.replace('"', '')
 
     # builds the vocab list once, before the prompt loop
     vocab = set(get_vocabulary(allow_char_temp, llm_model))
