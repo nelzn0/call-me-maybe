@@ -3,10 +3,9 @@ import numpy as np
 from call_me_maybe.models import FunctionDefinition, TestPrompt
 from pydantic import BaseModel, ValidationError
 from llm_sdk import Small_LLM_Model
-from call_me_maybe.decoder import get_valid_tokens_for_current_state, is_json_complete
 import argparse
 import os
-import string
+from call_me_maybe.decoder import State, allowed_tokens, walk_token, extract_value_after_pattern, is_json_complete, allow_char_temp
 
 
 def load_json_data(file_path: str, model_class: type[BaseModel]) -> list[BaseModel]:
@@ -89,6 +88,13 @@ def get_vocabulary(allowed_chars: str, llm_model: Small_LLM_Model) -> dict[str, 
     return valid_chars
 
 
+def find_function(func_defs: list[FunctionDefinition], text: str) -> FunctionDefinition | None:
+    for f in func_defs:
+        if f.name == text:
+            return f
+    return None
+
+
 def generate(args: argparse.Namespace) -> None:
     """Generates a function call for each prompt and writes the results to a file.
 
@@ -104,12 +110,9 @@ def generate(args: argparse.Namespace) -> None:
 
     llm_model = Small_LLM_Model()
 
-    allowed_chars = string.ascii_letters + string.punctuation + ' ' + string.digits
-    allow_char_temp = allowed_chars.replace('\\', '')
-    allowed_in_string = allow_char_temp.replace('"', '')
-
     # builds the vocab list once, before the prompt loop
-    vocab = set(get_vocabulary(allow_char_temp, llm_model))
+    vocab = get_vocabulary(allow_char_temp, llm_model)
+    vocab_invert = {token_id: text for text, token_id in vocab.items()}
 
     functions = ""
     for f in func_defs:
@@ -127,58 +130,87 @@ def generate(args: argparse.Namespace) -> None:
 
     final_result = []
 
-    for current_input in inputs:
+    try:
+        for current_input in inputs:
 
-        prompt = f"""You have access to the following function:
+            prompt = f"""You have access to the following function:
 
-        Available functions:
+            Available functions:
 
-        {functions}
+            {functions}
 
-        Given the user's question, respond with a JSON object specifying which
-        function to call and with what parameters.
+            Given the user's question, respond with a JSON object specifying which
+            function to call and with what parameters.
 
-        User question: {current_input.prompt}
+            User question: {current_input.prompt}
 
-        Respond ONLY with a JSON object in this format using the appropriate function to the users question:
-        {{"name": "function_name", "parameters": {{...}}}}
+            Respond ONLY with a JSON object in this format using the appropriate function to the users question:
+            {{"name": "function_name", "parameters": {{...}}}}
 
-        Response: """
+            Response: """
 
-        encoded = llm_model.encode(prompt)
-        input_ids = encoded[0].tolist()
-        output_ids = []
-        max_tokens = 200
+            encoded = llm_model.encode(prompt)
+            input_ids = encoded[0].tolist()
+            options = [func.name for func in func_defs]
+            output_ids = []
+            chosen_func = None
+            func_name = None
+            state = State.F_START
+            param_type = None
+            name_start_state = None
+            max_tokens = 200
 
-        for i in range(max_tokens):
-            full_context = input_ids + output_ids
-            logits = llm_model.get_logits_from_input_ids(full_context)
+            for _ in range(max_tokens):
+                full_context = input_ids + output_ids
+                logits = llm_model.get_logits_from_input_ids(full_context)
 
-            generated_text = llm_model.decode(output_ids)
+                generated_text = llm_model.decode(output_ids)
 
-            # valid tokens depend on the JSON generated so far
-            valid_tokens = get_valid_tokens_for_current_state(generated_text, func_defs, llm_model, vocab)
+                # valid tokens depend on the JSON generated so far
+                valid_tokens = allowed_tokens(state, vocab, generated_text, options, param_type, func_name)
 
-            if valid_tokens is not None:
-                # block invalid tokens
-                if isinstance(valid_tokens, list):
-                    valid_tokens = set(valid_tokens)
+                if not valid_tokens:
+                    raise ValueError("No valid tokens found")
+
                 for j in range(len(logits)):
                     if j not in valid_tokens:
                         logits[j] = -float('inf')
 
-            best_token_id = np.argmax(logits)
-            output_ids.append(best_token_id)
+                best_token_id = np.argmax(logits)
+                chosen_text = vocab_invert[best_token_id]
+                walk_result = walk_token(state, chosen_text, generated_text, options, param_type, func_name)
+                if walk_result is not None:
+                    new_state, prev_state = walk_result
+                    if new_state == State.P_NAME and state != State.P_NAME:
+                        name_start_state = prev_state
+                    if state == State.F_NAME and new_state == State.F_PARAM:
+                        func_name = extract_value_after_pattern(generated_text + chosen_text, '{"name": "', ['"'])
+                        chosen_func = find_function(func_defs, func_name)
+                        options = list(chosen_func.parameters.keys())
+                    if state == State.P_NAME and new_state == State.P_COLON:
+                        if name_start_state == State.P_OPEN:
+                            param_name = extract_value_after_pattern(
+                                generated_text + chosen_text, '"parameters": {"', ['"'])
+                        else:
+                            param_name = extract_value_after_pattern(generated_text + chosen_text, ', "', ['"'], False)
+                        param_type = chosen_func.parameters[param_name].type
+                    state = new_state
+                else:
+                    raise ValueError("No new states found")
 
-            generated_text = llm_model.decode(output_ids)
+                output_ids.append(best_token_id)
 
-            if is_json_complete(generated_text):
-                entry = {}
-                entry["prompt"] = current_input.prompt
-                parsed_result = json.loads(generated_text)
-                entry.update(parsed_result)
-                final_result.append(entry)
-                break
+                generated_text = llm_model.decode(output_ids)
+
+                if is_json_complete(generated_text):
+                    entry = {}
+                    entry["prompt"] = current_input.prompt
+                    parsed_result = json.loads(generated_text)
+                    entry.update(parsed_result)
+                    final_result.append(entry)
+                    break
+    except ValueError as e:
+        print(e)
 
     if os.path.dirname(args.output) != "":
         os.makedirs(os.path.dirname(args.output), exist_ok=True)

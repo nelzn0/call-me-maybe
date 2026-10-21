@@ -79,7 +79,7 @@ decoder looks at the text generated so far and decides which characters are
 allowed next. Every token that isn't allowed gets its logit set to `-inf`, so
 `argmax` can only pick a valid one.
 
-The state is decided from the end of the text and from a few key patterns:
+The state is stored in an explicit variable and updated after every token by `walk_token()`. Each state allows only the following:
 
 1. **Start:** nothing matches `{"name": "` yet, so only the characters of
    `{"name": "` are allowed, one at a time.
@@ -95,7 +95,7 @@ The state is decided from the end of the text and from a few key patterns:
 The first parameter name is found after `"parameters": {"`. Later parameter
 names are found after `, "`, using the last occurrence.
 
-Before generation, `get_vocabulary()` builds a set of token IDs whose text uses only allowed characters, once per run. The `Ġ` marker becomes a space before the check.
+Before generation, `get_vocabulary()` builds a dict of token text to token ID, keeping only tokens whose text uses allowed characters, once per run. The `Ġ` marker becomes a space before the check.
 
 ### Token Extraction
 
@@ -147,12 +147,13 @@ Used Pydantic models to validate input JSON files at load time. This catches mal
 
 ### State Machine Pattern
 
-Implemented the constrained decoding as a state machine to make the logic explicit and maintainable. Each state has clear entry/exit conditions and defines which tokens are valid.
+The constrained decoding is being refactored into a state machine to make the logic explicit and maintainable. `decoder.py` contains a `State` enum (including the outer `F_START`, `F_NAME`, and `F_PARAM` states), a transition table, and `next_state()`, which covers the outer object, function name, parameter names, colon, string, and number states. `walk_token()` runs one candidate token through `next_state()`, and `allowed_tokens()` collects the IDs of the vocabulary tokens that pass. `generator.py` has `find_function()`, which looks up the chosen function. `generate()` uses `allowed_tokens()` and `walk_token()` with an explicit state variable. It passes the chosen function name to both, and uses `vocab_invert` (ID to text) to get the text of each chosen token. The old helpers in `decoder.py` are still present and will be removed once the refactor runs end to end. [TODO: the current run fails with a `KeyError` when looking up a parameter name; end-to-end output is not verified yet.]
 
 ## Known Limitations
 
 - Function selection is not reliable for every prompt (for example, "Reverse the string" and "square root" get `fn_add_numbers`). The final choice is the model's.
 - Escape sequences are not supported. Backslashes are removed from string content.
+- The state machine in `decoder.py` plans to support escape sequences other than `\u`, which is deliberately rejected because the test prompts do not need it.
 
 ## Performance Analysis
 
@@ -196,7 +197,7 @@ Implemented the constrained decoding as a state machine to make the logic explic
 ## Testing Strategy
 
 - Helper checks: `is_escaped_quote()` on `"a\"b"`, `"a\\"b"`, and `"a\\\"b"` returns `True`, `False`, and `True` at the quote positions. `is_in_string()` on `"parameters": {"name": "` returns `True`, and on `"a\"b"` returns `False`.
-- Single-prompt run: `one_prompt.json` produces a valid result for `What is the sum of 2 and 3?`.
+- Single-prompt run: `one_prompt.json` produced a valid result for `What is the sum of 2 and 3?` before the refactor. [TODO: re-verify after the refactor run completes.]
 - Full run: string values such as `"shrek"` and `"john"` are complete. Known gap: function choice is wrong for several prompts.
 - Validation of output JSON structure using Python's json module.
 - Edge case testing (TO-DO)
@@ -235,6 +236,6 @@ Output for the prompt "Greet shrek" and "Greet john" (from `data/output/function
     "parameters": {
       "name": "john"
     }
-  },
+  }
 ]
 ```
