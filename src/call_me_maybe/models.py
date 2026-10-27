@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 
 class ParamType(BaseModel):
-    """the type of one parameter, like "number" or "string"""
+    """The type of one parameter, like "number" or "string"."""
     type: str
 
 

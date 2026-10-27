@@ -34,6 +34,8 @@ uv run python -m src [--functions_definition <file>] [--input <file>] [--output 
 - Input prompts: `data/input/function_calling_tests.json`
 - Output results: `data/output/function_calling_results.json`
 
+The program prints a title banner, then status lines for the functions and prompts. After each prompt finishes, it prints the prompt and its JSON result, and it prints a summary at the end. Errors go to stderr. The program exits with code 1 for file or output errors and with code 130 on Ctrl+C. Colors are used only when output goes to a terminal, and they are turned off when `NO_COLOR` is set.
+
 ### Example
 
 ```bash
@@ -275,7 +277,7 @@ The code is organized into four modules:
 - `models.py`: Pydantic models for data validation (FunctionDefinition, TestPrompt, ParamType)
 - `decoder.py`: Constrained decoding logic and state machine
 - `generator.py`: Main generation loop and data loading
-- `cli.py`: Command-line interface and argument parsing
+- `cli.py`: Command-line interface, argument parsing, title banner, progress output, and error handling
 
 This separation makes each component testable and maintainable.
 
@@ -289,11 +291,13 @@ Used Pydantic models to validate input JSON files at load time. This catches mal
 
 ### State Machine Pattern
 
-The constrained decoding is a state machine. `decoder.py` contains a `State` enum (including the outer `F_START`, `F_NAME`, and `F_PARAM` states), a transition table, and `next_state()`, which covers the outer object, function name, parameter names, colon, string, and number states. `walk_token()` runs one candidate token through `next_state()`, and `allowed_tokens()` collects the IDs of the vocabulary tokens that pass. `generator.py` has `find_function()`, which looks up the chosen function, `capture_function_name()` and `capture_param_name()`, which read the names from the generated text, and `pick_token()`, which masks the logits with `mask_logits()`, picks the highest one, and returns its ID and text. `build_functions_text()`, `build_prompt()`, `invert_vocab()`, and `write_result()` handle the prompt and the output file. `generate_call()` runs the token loop for one prompt with an explicit state variable, passing the chosen function name to `allowed_tokens()` and `walk_token()`, and returns the parsed JSON. `generate()` loads the files, builds the vocabulary once, calls `generate_call()` for each prompt, and writes the results. `walk_token()` returns the state after the token and the state before its last character, and `generate_call()` uses the second value to record where a parameter name began.
+The constrained decoding is a state machine. `decoder.py` contains a `State` enum (including the outer `F_START`, `F_NAME`, and `F_PARAM` states), a transition table, and `next_state()`, which covers the outer object, function name, parameter names, colon, string, and number states. `walk_token()` runs one candidate token through `next_state()`, and `allowed_tokens()` collects the IDs of the vocabulary tokens that pass. `generator.py` has `find_function()`, which looks up the chosen function, `capture_function_name()` and `capture_param_name()`, which read the names from the generated text, and `pick_token()`, which masks the logits with `mask_logits()`, picks the highest one, and returns its ID and text. `build_functions_text()`, `build_prompt()`, `invert_vocab()`, and `write_result()` handle the prompt and the output file. `generate_call()` runs the token loop for one prompt with an explicit state variable, passing the chosen function name to `allowed_tokens()` and `walk_token()`, and returns the parsed JSON. `generate()` loads the files, builds the vocabulary once, calls `generate_call()` for each prompt, and writes the results. It takes an optional `on_result` callback, which it calls with the prompt's position, the total count, and the result after each successful prompt, and it returns the list of results. `cli.py` uses the callback to print each result. `walk_token()` returns the state after the token and the state before its last character, and `generate_call()` uses the second value to record where a parameter name began.
 
 ### Error Handling
 
 Each prompt is handled on its own. If `generate_call()` raises a `ValueError` (no valid token, no matching function or parameter, or the JSON is not finished after `MAX_TOKENS`), `generate()` prints the prompt and the reason, then moves on. The output can therefore have fewer entries than the input.
+
+`cli.py` handles missing or invalid input files and output write errors. It prints one error line to stderr and exits with code 1.
 
 ## Known Limitations
 
@@ -304,7 +308,7 @@ Each prompt is handled on its own. If `generate_call()` raises a `ValueError` (n
 - Escape sequences are not supported. Backslashes are removed from string content.
 - The state machine in `decoder.py` plans to support escape sequences other than `\u`, which is deliberately rejected because the test prompts do not need it.
 - String values can currently contain `{` and `}`, because they are in the vocabulary used for string values. `is_json_complete()` counts raw braces, so a brace inside a value can end generation too early. [TODO: fix this and confirm it with a test prompt]
-- A missing or invalid input file is not handled yet. The program stops with a traceback instead of a clear message. [TODO: catch file errors in `cli.py`]
+- Errors other than missing or invalid input files and output write errors are not caught in `cli.py` yet, for example model loading errors. [TODO: check which errors model loading can raise and handle them in `cli.py`]
 
 ## Performance Analysis
 

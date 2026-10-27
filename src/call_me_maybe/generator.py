@@ -1,4 +1,5 @@
 import json
+import sys
 import numpy as np
 from call_me_maybe.models import FunctionDefinition, TestPrompt
 from pydantic import BaseModel, ValidationError
@@ -6,6 +7,7 @@ from llm_sdk import Small_LLM_Model
 import argparse
 import os
 from typing import Any
+from collections.abc import Callable
 from call_me_maybe.decoder import (
     State, allowed_tokens, walk_token,
     extract_value_after_pattern, is_json_complete, allow_char_temp
@@ -215,7 +217,7 @@ def mask_logits(logits: list[float], valid_tokens: set[int]) -> list[float]:
     return logits
 
 
-def write_result(path: str, results: list[dict]) -> None:
+def write_result(path: str, results: list[dict[str, Any]]) -> None:
     """Writes the results to a JSON file.
 
     Makes the folder first if it doesn't exist yet.
@@ -414,7 +416,10 @@ def generate_call(
     raise ValueError("Failed to generate call")
 
 
-def generate(args: argparse.Namespace) -> None:
+def generate(
+    args: argparse.Namespace,
+    on_result: Callable[[int, int, dict[str, Any]], None] | None = None,
+) -> list[dict[str, Any]]:
     """Generates a function call for each prompt and writes them to a file.
 
     Loads the functions and prompts, builds the vocabulary once, then runs
@@ -422,6 +427,12 @@ def generate(args: argparse.Namespace) -> None:
 
     Args:
         args: The parsed command-line arguments (file paths)
+        on_result: Optional function called after each successful prompt
+            with its position, the total number of prompts, and the result,
+            for the CLI
+
+    Returns:
+        The results that were written to the output file
     """
 
     func_defs = load_json_data(args.functions_definition, FunctionDefinition)
@@ -437,8 +448,9 @@ def generate(args: argparse.Namespace) -> None:
     functions = build_functions_text(func_defs)
 
     final_result = []
+    total = len(inputs)
 
-    for current_input in inputs:
+    for index, current_input in enumerate(inputs, start=1):
         # one bad prompt shouldn't stop the rest
         try:
             prompt = build_prompt(functions, current_input.prompt)
@@ -450,7 +462,13 @@ def generate(args: argparse.Namespace) -> None:
             )
             entry.update(parsed_result)
             final_result.append(entry)
+            # the caller decides how to show each result
+            if on_result is not None:
+                print("")
+                on_result(index, total, entry)
         except ValueError as e:
-            print(f"Prompt: '{current_input.prompt}' - Failed because {e}")
+            print(f"Prompt: '{current_input.prompt}' - Failed because {e}",
+                  file=sys.stderr)
 
     write_result(args.output, final_result)
+    return final_result
