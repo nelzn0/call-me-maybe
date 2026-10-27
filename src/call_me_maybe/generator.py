@@ -67,8 +67,7 @@ def load_json_data[T: BaseModel](
 def get_vocabulary(
     allowed_chars: str, llm_model: Small_LLM_Model
 ) -> dict[str, int]:
-    """Builds a dict of token text to token ID,
-    for tokens whose text only uses allowed characters.
+    """Builds a dict of token text to token ID.
 
     Reads the vocabulary file from the model, turns the Ġ space marker into
     a real space, and keeps every token where all characters are allowed.
@@ -78,7 +77,7 @@ def get_vocabulary(
         llm_model: The LLM model, used to find the vocabulary file
 
     Returns:
-        A dict of the text with its corresponding ID
+        The token text as the key, and its ID as the value
     """
 
     vocab = llm_model.get_path_to_vocab_file()
@@ -237,7 +236,7 @@ def pick_token(
     valid_tokens: set[int],
     vocab_invert: dict[int, str],
 ) -> tuple[int, str]:
-    """Takes the logits and valid tokens, masks the logits
+    """Takes the logits and valid tokens, masks the invalid logits
     with mask_logits and picks the highest one
 
     Args:

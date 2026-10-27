@@ -21,6 +21,8 @@ uv sync
 
 This installs numpy, pydantic, accelerate, and llm-sdk. llm-sdk brings in torch, transformers, and huggingface-hub.
 
+[TODO: add a Makefile with install, run, debug, clean, lint, and lint-strict rules]
+
 ### Running the Program
 
 ```bash
@@ -90,12 +92,156 @@ The state is stored in an explicit variable and updated after every token by `wa
 5. **After the key:** a colon, then a space or `{`, then `{`.
 6. **Parameter names:** the letters of the valid parameter names for the
    chosen function. Once a name is closed, a colon is allowed.
-7. **Parameter values:** the parameter's type comes from the schema. `number` allows digits and `-` after the colon, then more digits, `,`, or `}`. `string` allows `"` after the colon to open the value. Inside the string, the allowed tokens come from the precomputed vocabulary list. After the closing `"`, only `,` or `}` is allowed.
+7. **Parameter values:** the parameter's type comes from the schema. `number` allows spaces, digits, and `-` after the colon. After a digit, it allows more digits, one `.` followed by digits, `,`, or `}`. `string` allows spaces, then `"` after the colon to open the value. Inside the string, the allowed tokens come from the precomputed vocabulary list. After the closing `"`, only `,` or `}` is allowed.
 
 The first parameter name is found after `"parameters": {"`. Later parameter
 names are found after `, "`, using the last occurrence.
 
 Before generation, `get_vocabulary()` builds a dict of token text to token ID, keeping only tokens whose text uses allowed characters, once per run. The `Ġ` marker becomes a space before the check.
+
+### State Diagram
+
+Overview of the main path:
+
+```
++--------------+    +---------------+    +----------------+    +---------+
+| Outer object |--->| Function name |--->| Parameter name |--->|  Colon  |
++--------------+    +---------------+    +----------------+    +---------+
+                                                                    |
+                                                +-------------------+
+                                                v                   v
+                                         +--------------+   +--------------+
+                                         | String value |   | Number value |
+                                         +--------------+   +--------------+
+                                         after a value:
+                                           ',' --> back to Parameter name
+                                           '}' --> Done
+```
+
+Each diagram shows one part of the state machine. `(stay)` means the state loops back to itself on that input. Each arrow label is the character (or forced piece of text) that moves the decoder to the next state.
+
+**Header** (outer object, function name, parameters key):
+
+```
+ +----------+
+ | F_START  |<-- prefix of {"name": "  (stay)
+ +----------+
+     |
+     | {"name": "
+     v
+ +----------+
+ |  F_NAME  |<-- letters of a function name  (stay)
+ +----------+
+     |
+     | closing quote, name is valid
+     v
+ +----------+
+ |  F_PARAM |<-- prefix of , "parameters": {  (stay)
+ +----------+
+     |
+     | , "parameters": {
+     v
+ +----------+
+ |  P_OPEN  |
+ +----------+
+     |
+     | '"'
+     v
+   (parameter name)
+```
+
+**Parameter name** (the key of each parameter):
+
+```
+   (from ',' after a value)
+ +----------+
+ |  P_NEXT  |<-- space  (stay)
+ +----------+
+     |
+     | '"'
+     v
+ +----------+
+ |  P_NAME  |<-- letters of a parameter name  (stay)
+ +----------+
+     |
+     | closing quote, name is valid
+     v
+ +----------+
+ |  P_COLON |
+ +----------+
+     |
+     | ':'
+     +-- string type --> String value
+     +-- number type --> Number value
+```
+
+**String value**:
+
+```
+ +----------+
+ | STR_OPEN |<-- space  (stay)
+ +----------+
+     |
+     | '"'
+     v
+ +----------+
+ |IN_STRING |<-- allowed character  (stay)
+ +----------+
+     |
+     | '"'
+     v
+ +--------------+
+ |P_AFTER_VALUE |
+ +--------------+
+     |
+     | ','   --> P_NEXT
+     | '}'   --> P_CLOSE
+```
+
+A backslash inside a string would move to `IN_ESCAPE`, but it is not reachable yet because backslash is removed from the vocabulary.
+
+**Number value**:
+
+```
+ after ':'
+     |
+     v
+ +-----------+   '-'   +--------------+
+ | NUM_START |-------->| NUM_NEGATIVE |
+ +-----------+         +--------------+
+     |    ^                   |
+     |    '-- space (stay)    |
+     |                        |
+     | digit                  | digit
+     |                        |
+     v                        v
+ +------------------------------------+
+ |              NUM_INT               |<-- digit (stay)
+ +------------------------------------+
+     |                 ',' --> P_NEXT
+     | '.'             '}' --> P_CLOSE
+     v
+ +-------------------+  digit   +--------------+
+ | NUM_DECIMAL_POINT |--------->| NUM_DECIMAL  |<-- digit (stay)
+ +-------------------+          +--------------+
+                                    |
+                                    | ',' --> P_NEXT
+                                    | '}' --> P_CLOSE
+```
+
+**Closing**:
+
+```
+ +----------+
+ |  P_CLOSE |
+ +----------+
+     |
+     | '}'
+     v
+ +----------+
+ |   DONE   |
+ +----------+
+```
 
 ### Token Extraction
 
@@ -109,20 +255,16 @@ This handles cases where we need to extract partial values during generation (li
 
 ### Token Validation
 
-The `get_valid_next_tokens()` function:
-- Takes the partial text generated so far
-- Compares it against valid options (function names or parameter names)
-- Finds which options match the current prefix
-- Returns the token IDs that could continue any matching option
+The `allowed_tokens()` function:
+- Loops over the vocabulary
+- Runs each token's characters through `walk_token()` from the current state
+- Returns the IDs of the tokens where every character moves the state machine forward
 
 This ensures the model can only generate tokens that lead to valid JSON structure and schema compliance.
 
 ### Escapes and Strings
 
-A quote inside a value is only a boundary if it isn't escaped. `is_escaped_quote()`
-walks left from a quote and counts the backslashes directly in front of it. An odd
-count means the quote is escaped. `is_in_string()` counts the unescaped quotes in
-the text, and an odd total means the text ends inside a string.
+Inside a string, `next_state()` has an escape path: a `\` moves to `IN_ESCAPE`, and the next character must be one of `"\/bfnrt`. Backslash is not in the vocabulary used for string values, so this path is not reachable yet.
 
 
 ## Design Decisions
@@ -139,7 +281,7 @@ This separation makes each component testable and maintainable.
 
 ### Generic Helper Functions
 
-Created reusable functions like `extract_value_after_pattern()` and `get_valid_next_tokens()` that work for both function names and parameter names. This reduces code duplication and makes the state machine easier to extend.
+Created reusable functions like `extract_value_after_pattern()` and `allowed_tokens()` that work for both function names and parameter names. This reduces code duplication and makes the state machine easier to extend.
 
 ### Pydantic for Validation
 
@@ -147,26 +289,35 @@ Used Pydantic models to validate input JSON files at load time. This catches mal
 
 ### State Machine Pattern
 
-The constrained decoding is being refactored into a state machine to make the logic explicit and maintainable. `decoder.py` contains a `State` enum (including the outer `F_START`, `F_NAME`, and `F_PARAM` states), a transition table, and `next_state()`, which covers the outer object, function name, parameter names, colon, string, and number states. `walk_token()` runs one candidate token through `next_state()`, and `allowed_tokens()` collects the IDs of the vocabulary tokens that pass. `generator.py` has `find_function()`, which looks up the chosen function. `generate()` uses `allowed_tokens()` and `walk_token()` with an explicit state variable. It passes the chosen function name to both, and uses `vocab_invert` (ID to text) to get the text of each chosen token. The old helpers in `decoder.py` are still present and will be removed once the refactor runs end to end. [TODO: the current run fails with a `KeyError` when looking up a parameter name; end-to-end output is not verified yet.]
+The constrained decoding is a state machine. `decoder.py` contains a `State` enum (including the outer `F_START`, `F_NAME`, and `F_PARAM` states), a transition table, and `next_state()`, which covers the outer object, function name, parameter names, colon, string, and number states. `walk_token()` runs one candidate token through `next_state()`, and `allowed_tokens()` collects the IDs of the vocabulary tokens that pass. `generator.py` has `find_function()`, which looks up the chosen function, `capture_function_name()` and `capture_param_name()`, which read the names from the generated text, and `pick_token()`, which masks the logits with `mask_logits()`, picks the highest one, and returns its ID and text. `build_functions_text()`, `build_prompt()`, `invert_vocab()`, and `write_result()` handle the prompt and the output file. `generate_call()` runs the token loop for one prompt with an explicit state variable, passing the chosen function name to `allowed_tokens()` and `walk_token()`, and returns the parsed JSON. `generate()` loads the files, builds the vocabulary once, calls `generate_call()` for each prompt, and writes the results. `walk_token()` returns the state after the token and the state before its last character, and `generate_call()` uses the second value to record where a parameter name began.
+
+### Error Handling
+
+Each prompt is handled on its own. If `generate_call()` raises a `ValueError` (no valid token, no matching function or parameter, or the JSON is not finished after `MAX_TOKENS`), `generate()` prints the prompt and the reason, then moves on. The output can therefore have fewer entries than the input.
 
 ## Known Limitations
 
-- Function selection is not reliable for every prompt (for example, "Reverse the string" and "square root" get `fn_add_numbers`). The final choice is the model's.
+- Function selection and argument extraction were checked only on the 10 prompts in `data/input/function_calling_tests.json` (10 of 10 in the latest run). Other prompts are untested, and the final choice is the model's.
+- Only `number` and `string` parameter types are supported. Other types (for example `boolean`) stop generation with an error.
+- Functions with no parameters are not supported.
+- String values cannot contain `"` or `\`, and characters outside ASCII are not in the vocabulary used for string values.
 - Escape sequences are not supported. Backslashes are removed from string content.
 - The state machine in `decoder.py` plans to support escape sequences other than `\u`, which is deliberately rejected because the test prompts do not need it.
+- String values can currently contain `{` and `}`, because they are in the vocabulary used for string values. `is_json_complete()` counts raw braces, so a brace inside a value can end generation too early. [TODO: fix this and confirm it with a test prompt]
+- A missing or invalid input file is not handled yet. The program stops with a traceback instead of a clear message. [TODO: catch file errors in `cli.py`]
 
 ## Performance Analysis
 
 [TODO: Add performance metrics after completing the implementation]
 
 ### Accuracy
-[TODO: Measure correct function selection rate across test prompts]
+In the latest run, all 10 prompts in `data/input/function_calling_tests.json` got the expected function and parameters. This is a small test set, so it doesn't show accuracy on other prompts.
 
 ### Speed
 [TODO: Measure tokens per second and total processing time]
 
 ### Reliability
-[TODO: Measure percentage of outputs that are valid JSON and schema-compliant]
+All 10 outputs parsed as JSON and matched the function schema (function names and parameter types). This was measured on the test file only.
 
 ## Challenges Faced
 
@@ -186,7 +337,7 @@ The constrained decoding is being refactored into a state machine to make the lo
 
 **Problem**: A `"` can open a value, close a value, or be part of the content of a value, and a backslash can turn a quote into content. Counting quotes alone gives the wrong answer when escaped quotes are present.
 
-**Solution**: `is_escaped_quote()` walks left from a quote and checks whether an odd number of backslashes precedes it. `is_in_string()` counts only the unescaped quotes, so an odd total means the text ends inside a string. Backslashes are currently removed from string content, so escape sequences are not supported yet.
+**Solution**: Backslashes are currently removed from the vocabulary, so string values cannot contain `\`. `next_state()` has an escape path for `\`, but it is not reachable until backslash tokens are allowed. Escape sequences are not supported yet.
 
 ### Multi-Character Tokens
 
@@ -196,9 +347,8 @@ The constrained decoding is being refactored into a state machine to make the lo
 
 ## Testing Strategy
 
-- Helper checks: `is_escaped_quote()` on `"a\"b"`, `"a\\"b"`, and `"a\\\"b"` returns `True`, `False`, and `True` at the quote positions. `is_in_string()` on `"parameters": {"name": "` returns `True`, and on `"a\"b"` returns `False`.
-- Single-prompt run: `one_prompt.json` produced a valid result for `What is the sum of 2 and 3?` before the refactor. [TODO: re-verify after the refactor run completes.]
-- Full run: string values such as `"shrek"` and `"john"` are complete. Known gap: function choice is wrong for several prompts.
+- Helper checks: `build_functions_text()`, `build_prompt()`, `invert_vocab()`, `mask_logits()`, `find_function()`, `capture_function_name()`, `capture_param_name()`, and `write_result()` were checked by hand against the real input files. These are not yet written as unit tests. [TODO: add unit tests]
+- Full run: the 10-prompt test file produces valid output after the refactor. The output matches the previous run, except the vowel prompt, which now uses the regex `([aeiouAEIOU])`.
 - Validation of output JSON structure using Python's json module.
 - Edge case testing (TO-DO)
 
