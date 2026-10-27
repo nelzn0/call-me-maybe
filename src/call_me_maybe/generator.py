@@ -5,6 +5,7 @@ from pydantic import BaseModel, ValidationError
 from llm_sdk import Small_LLM_Model
 import argparse
 import os
+from typing import Any
 from call_me_maybe.decoder import (
     State, allowed_tokens, walk_token,
     extract_value_after_pattern, is_json_complete, allow_char_temp
@@ -14,7 +15,9 @@ from call_me_maybe.decoder import (
 MAX_TOKENS = 200
 
 
-def load_json_data(file_path: str, model_class: type[BaseModel]) -> list[BaseModel]:
+def load_json_data[T: BaseModel](
+    file_path: str, model_class: type[T]
+) -> list[T]:
     """Loads JSON data from a file and validates it against a pydantic model.
 
     Reads the JSON file, checks if it's valid, and makes sure each item matches
@@ -33,8 +36,8 @@ def load_json_data(file_path: str, model_class: type[BaseModel]) -> list[BaseMod
         ValueError: If the JSON is invalid or any item doesn't match the model
     """
 
-    json_data = []
-    data_errors = []
+    json_data: list[T] = []
+    data_errors: list[str] = []
 
     # opening and validating the json file
     try:
@@ -48,7 +51,9 @@ def load_json_data(file_path: str, model_class: type[BaseModel]) -> list[BaseMod
                     except ValidationError as e:
                         data_errors.append(f"Error: {e}")
             except json.JSONDecodeError as e:
-                raise ValueError(f"Error: Invalid JSON in file {file_path}: {e}")
+                raise ValueError(
+                    f"Error: Invalid JSON in file {file_path}: {e}"
+                )
     except FileNotFoundError:
         raise FileNotFoundError(f"Could not find file {file_path}")
 
@@ -59,7 +64,9 @@ def load_json_data(file_path: str, model_class: type[BaseModel]) -> list[BaseMod
         return json_data
 
 
-def get_vocabulary(allowed_chars: str, llm_model: Small_LLM_Model) -> dict[str, int]:
+def get_vocabulary(
+    allowed_chars: str, llm_model: Small_LLM_Model
+) -> dict[str, int]:
     """Builds a dict of token text to token ID,
     for tokens whose text only uses allowed characters.
 
@@ -94,7 +101,19 @@ def get_vocabulary(allowed_chars: str, llm_model: Small_LLM_Model) -> dict[str, 
     return valid_chars
 
 
-def find_function(func_defs: list[FunctionDefinition], text: str) -> FunctionDefinition | None:
+def find_function(
+    func_defs: list[FunctionDefinition], text: str
+) -> FunctionDefinition | None:
+    """Finds the function definition with the given name.
+
+    Args:
+        func_defs: All the function definitions we loaded
+        text: The function name to look for
+
+    Returns:
+        The matching definition, or None if no function has that name
+    """
+
     for f in func_defs:
         if f.name == text:
             return f
@@ -102,6 +121,18 @@ def find_function(func_defs: list[FunctionDefinition], text: str) -> FunctionDef
 
 
 def build_functions_text(func_defs: list[FunctionDefinition]) -> str:
+    """Turns the function definitions into text for the prompt.
+
+    Each function gets its name, description, and parameter types, so the
+    model knows what it can pick from.
+
+    Args:
+        func_defs: The function definitions to list
+
+    Returns:
+        The text block with every function in it
+    """
+
     functions = ""
     for f in func_defs:
         para = {}
@@ -120,6 +151,15 @@ Parameters: {json.dumps(para)}
 
 
 def build_prompt(functions_text: str, user_prompt: str) -> str:
+    """Puts the function list and the user's question into the prompt.
+
+    Args:
+        functions_text: The text block from build_functions_text
+        user_prompt: The question the user asked
+
+    Returns:
+        The full prompt we send to the model
+    """
 
     prompt = f"""You have access to the following functions:
 
@@ -132,7 +172,8 @@ function to call and with what parameters.
 
 User question: {user_prompt}
 
-Respond ONLY with a JSON object in this format using the appropriate function to the users question:
+Respond ONLY with a JSON object in this format using the appropriate \
+function to the user's question:
 {{"name": "function_name", "parameters": {{...}}}}
 
 Response: """
@@ -141,6 +182,14 @@ Response: """
 
 
 def invert_vocab(vocab: dict[str, int]) -> dict[int, str]:
+    """Flips the vocab so we can look up text from an ID.
+
+    Args:
+        vocab: Maps token text to token ID
+
+    Returns:
+        Maps token ID back to token text
+    """
 
     vocab_invert = {token_id: text for text, token_id in vocab.items()}
 
@@ -148,6 +197,18 @@ def invert_vocab(vocab: dict[str, int]) -> dict[int, str]:
 
 
 def mask_logits(logits: list[float], valid_tokens: set[int]) -> list[float]:
+    """Sets the logit of every token we can't use to -inf.
+
+    That way argmax can only pick a valid token.
+
+    Args:
+        logits: The scores from the model, one per token
+        valid_tokens: The IDs we're allowed to pick
+
+    Returns:
+        The same logits list, with the invalid ones set to -inf
+    """
+
     for j in range(len(logits)):
         if j not in valid_tokens:
             logits[j] = -float('inf')
@@ -156,6 +217,14 @@ def mask_logits(logits: list[float], valid_tokens: set[int]) -> list[float]:
 
 
 def write_result(path: str, results: list[dict]) -> None:
+    """Writes the results to a JSON file.
+
+    Makes the folder first if it doesn't exist yet.
+
+    Args:
+        path: Where to save the file
+        results: The entries to write
+    """
     if os.path.dirname(path) != "":
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
@@ -163,15 +232,199 @@ def write_result(path: str, results: list[dict]) -> None:
         json.dump(results, f, indent=2)
 
 
-def generate(args: argparse.Namespace) -> None:
-    """Generates a function call for each prompt and writes the results to a file.
+def pick_token(
+    logits: list[float],
+    valid_tokens: set[int],
+    vocab_invert: dict[int, str],
+) -> tuple[int, str]:
+    """Takes the logits and valid tokens, masks the logits
+    with mask_logits and picks the highest one
 
-    Builds the vocabulary once, then for each prompt masks the logits so only
-    valid tokens can be picked, until the JSON object is complete.
+    Args:
+        logits: the list of logits
+        valid_tokens: the valid tokens so far
+        vocab_invert: the inverted vocabulary
+
+    Returns:
+        the token ID and text
+    """
+
+    logits = mask_logits(logits, valid_tokens)
+
+    best_token_id = int(np.argmax(logits))
+
+    chosen_text = vocab_invert[best_token_id]
+
+    return best_token_id, chosen_text
+
+
+def capture_function_name(
+    generated_text: str,
+    chosen_text: str,
+    func_defs: list[FunctionDefinition],
+) -> FunctionDefinition | None:
+    """Gets the function name from the text and finds its definition.
+
+    Args:
+        generated_text: The text generated before this token
+        chosen_text: The token we just picked
+        func_defs: The function definitions to search
+
+    Returns:
+        The matching function, or None if we can't find the name
+    """
+
+    func_name = extract_value_after_pattern(
+        generated_text + chosen_text, '{"name": "', ['"']
+    )
+    if func_name is None:
+        return None
+
+    chosen_func = find_function(func_defs, func_name)
+    return chosen_func
+
+
+def capture_param_name(
+    generated_text: str,
+    chosen_text: str,
+    name_start_state: State | None,
+) -> str | None:
+    """Gets the name of the parameter we're on right now.
+
+    The first parameter comes after '"parameters": {"'. Later ones come
+    after ', "', so we take the last one.
+
+    Args:
+        generated_text: The text generated before this token
+        chosen_text: The token we just picked
+        name_start_state: The state where the parameter name started
+
+    Returns:
+        The parameter name, or None if we can't find it
+    """
+
+    if name_start_state == State.P_OPEN:
+        param_name = extract_value_after_pattern(
+            generated_text + chosen_text, '"parameters": {"', ['"']
+        )
+    else:
+        param_name = extract_value_after_pattern(
+            generated_text + chosen_text, ', "', ['"'], False
+        )
+
+    return param_name
+
+
+def generate_call(
+    llm_model: Small_LLM_Model,
+    vocab: dict[str, int],
+    vocab_invert: dict[int, str],
+    func_defs: list[FunctionDefinition],
+    prompt: str,
+) -> dict[str, Any]:
+    """Runs the token loop for one prompt and returns the parsed JSON.
+
+    Args:
+        llm_model: The model we're generating with
+        vocab: Maps token text to token ID
+        vocab_invert: Maps token ID back to token text
+        func_defs: The function definitions to pick from
+        prompt: The full prompt, from build_prompt
+
+    Returns:
+        The JSON object the model built, as a dict
+
+    Raises:
+        ValueError: If no valid token is left, the state doesn't match,
+            or the JSON isn't finished after MAX_TOKENS
+    """
+
+    encoded = llm_model.encode(prompt)
+    input_ids = encoded[0].tolist()
+    options = [func.name for func in func_defs]
+    output_ids: list[int] = []
+    chosen_func = None
+    func_name = None
+    state = State.F_START
+    param_type = None
+    name_start_state = None
+
+    for _ in range(MAX_TOKENS):
+        full_context = input_ids + output_ids
+        logits = llm_model.get_logits_from_input_ids(full_context)
+
+        generated_text = llm_model.decode(output_ids)
+
+        # valid tokens depend on the JSON generated so far
+        valid_tokens = allowed_tokens(
+            state, vocab, generated_text, options, param_type, func_name
+        )
+
+        if not valid_tokens:
+            raise ValueError("No valid tokens found")
+
+        best_token_id, chosen_text = pick_token(
+            logits, valid_tokens, vocab_invert
+        )
+
+        walk_result = walk_token(
+            state, chosen_text, generated_text, options, param_type, func_name
+        )
+        if walk_result is not None:
+            new_state, prev_state = walk_result
+            # remember where the parameter name starts,
+            # capture_param_name needs it
+            if new_state == State.P_NAME and state != State.P_NAME:
+                name_start_state = prev_state
+            # the function name is done, so look up its definition
+            # and its parameters
+            if state == State.F_NAME and new_state == State.F_PARAM:
+                chosen_func = capture_function_name(
+                    generated_text, chosen_text, func_defs
+                )
+                if chosen_func is None:
+                    raise ValueError("Unable to find chosen function")
+                func_name = chosen_func.name
+                options = list(chosen_func.parameters.keys())
+            # the parameter name is done, so look up its type
+            # in the functions definition
+            if state == State.P_NAME and new_state == State.P_COLON:
+                param_name = capture_param_name(
+                    generated_text, chosen_text, name_start_state
+                )
+                if param_name is None:
+                    raise ValueError(
+                        "Unable to find chosen function parameter"
+                    )
+                if chosen_func is None:
+                    raise ValueError("Unable to find chosen function")
+                param_type = chosen_func.parameters[param_name].type
+            state = new_state
+        else:
+            raise ValueError("No new states found")
+
+        output_ids.append(best_token_id)
+
+        generated_text = llm_model.decode(output_ids)
+
+        # stop once the braces are balanced
+        if is_json_complete(generated_text):
+            parsed_result: dict[str, Any] = json.loads(generated_text)
+            return parsed_result
+
+    raise ValueError("Failed to generate call")
+
+
+def generate(args: argparse.Namespace) -> None:
+    """Generates a function call for each prompt and writes them to a file.
+
+    Loads the functions and prompts, builds the vocabulary once, then runs
+    generate_call for each prompt. A prompt that fails is printed and skipped.
 
     Args:
         args: The parsed command-line arguments (file paths)
     """
+
     func_defs = load_json_data(args.functions_definition, FunctionDefinition)
 
     inputs = load_json_data(args.input, TestPrompt)
@@ -186,69 +439,19 @@ def generate(args: argparse.Namespace) -> None:
 
     final_result = []
 
-    try:
-        for current_input in inputs:
-
+    for current_input in inputs:
+        # one bad prompt shouldn't stop the rest
+        try:
             prompt = build_prompt(functions, current_input.prompt)
-
-            encoded = llm_model.encode(prompt)
-            input_ids = encoded[0].tolist()
-            options = [func.name for func in func_defs]
-            output_ids = []
-            chosen_func = None
-            func_name = None
-            state = State.F_START
-            param_type = None
-            name_start_state = None
-
-            for _ in range(MAX_TOKENS):
-                full_context = input_ids + output_ids
-                logits = llm_model.get_logits_from_input_ids(full_context)
-
-                generated_text = llm_model.decode(output_ids)
-
-                # valid tokens depend on the JSON generated so far
-                valid_tokens = allowed_tokens(state, vocab, generated_text, options, param_type, func_name)
-
-                if not valid_tokens:
-                    raise ValueError("No valid tokens found")
-
-                logits = mask_logits(logits, valid_tokens)
-
-                best_token_id = np.argmax(logits)
-                chosen_text = vocab_invert[best_token_id]
-                walk_result = walk_token(state, chosen_text, generated_text, options, param_type, func_name)
-                if walk_result is not None:
-                    new_state, prev_state = walk_result
-                    if new_state == State.P_NAME and state != State.P_NAME:
-                        name_start_state = prev_state
-                    if state == State.F_NAME and new_state == State.F_PARAM:
-                        func_name = extract_value_after_pattern(generated_text + chosen_text, '{"name": "', ['"'])
-                        chosen_func = find_function(func_defs, func_name)
-                        options = list(chosen_func.parameters.keys())
-                    if state == State.P_NAME and new_state == State.P_COLON:
-                        if name_start_state == State.P_OPEN:
-                            param_name = extract_value_after_pattern(
-                                generated_text + chosen_text, '"parameters": {"', ['"'])
-                        else:
-                            param_name = extract_value_after_pattern(generated_text + chosen_text, ', "', ['"'], False)
-                        param_type = chosen_func.parameters[param_name].type
-                    state = new_state
-                else:
-                    raise ValueError("No new states found")
-
-                output_ids.append(best_token_id)
-
-                generated_text = llm_model.decode(output_ids)
-
-                if is_json_complete(generated_text):
-                    entry = {}
-                    entry["prompt"] = current_input.prompt
-                    parsed_result = json.loads(generated_text)
-                    entry.update(parsed_result)
-                    final_result.append(entry)
-                    break
-    except ValueError as e:
-        print(e)
+            entry = {}
+            # prompt goes first so it's the first key in the output
+            entry["prompt"] = current_input.prompt
+            parsed_result = generate_call(
+                llm_model, vocab, vocab_invert, func_defs, prompt
+            )
+            entry.update(parsed_result)
+            final_result.append(entry)
+        except ValueError as e:
+            print(f"Prompt: '{current_input.prompt}' - Failed because {e}")
 
     write_result(args.output, final_result)
