@@ -439,10 +439,14 @@ def generate(
 
     inputs = load_json_data(args.input, TestPrompt)
 
-    llm_model = Small_LLM_Model()
+    try:
+        llm_model = Small_LLM_Model()
 
-    # builds the vocab list once, before the prompt loop
-    vocab = get_vocabulary(allow_char_temp, llm_model)
+        # builds the vocab list once, before the prompt loop
+        vocab = get_vocabulary(allow_char_temp, llm_model)
+    except (OSError, RuntimeError) as e:
+        raise ValueError(f"Could not load the model: {e}")
+
     vocab_invert = invert_vocab(vocab)
 
     functions = build_functions_text(func_defs)
