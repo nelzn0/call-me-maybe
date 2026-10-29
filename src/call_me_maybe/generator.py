@@ -6,7 +6,7 @@ from pydantic import BaseModel, ValidationError
 from llm_sdk import Small_LLM_Model
 import argparse
 import os
-from typing import Any
+from typing import Any, TypeVar
 from collections.abc import Callable
 from call_me_maybe.decoder import (
     State, allowed_tokens, walk_token,
@@ -16,8 +16,10 @@ from call_me_maybe.decoder import (
 
 MAX_TOKENS = 200
 
+T = TypeVar("T", bound=BaseModel)
 
-def load_json_data[T: BaseModel](
+
+def load_json_data(
     file_path: str, model_class: type[T]
 ) -> list[T]:
     """Loads JSON data from a file and validates it against a pydantic model.

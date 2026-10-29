@@ -4,3 +4,4 @@ en.subject.md
 __pycache__
 data/output/
 .mypy_cache/
+.cache/
