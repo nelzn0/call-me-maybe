@@ -7,7 +7,7 @@ ARGS		= --functions_definition $(FUNCTIONS) --input $(INPUT) --output $(OUTPUT)
 .PHONY: install run debug clean lint lint-strict
 
 install:
-	@uv sync
+	@uv sync --no-cache
 
 run:
 	$(PYTHON) -m src $(ARGS)
