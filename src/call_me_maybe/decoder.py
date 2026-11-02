@@ -51,6 +51,23 @@ allow_char_temp = (
 allowed_in_string = allow_char_temp.replace('"', '')
 
 
+def find_after_name(generated_so_far: str, func_name: str | None) -> str | None:
+    if func_name is not None:
+        name_start = generated_so_far.find(func_name + '"')
+        if name_start < 0:
+            return None
+        after_name_start = generated_so_far[name_start + len(func_name) + 1:]
+        return after_name_start
+    return None
+
+
+def text_after_last_quote(generated_so_far: str) -> str:
+    last_quote = generated_so_far.rfind('"')
+    name_so_far = generated_so_far[last_quote + 1:]
+
+    return name_so_far
+
+
 def next_state(
     state: State,
     char: str,
@@ -78,8 +95,7 @@ def next_state(
     """
 
     # the name typed so far, which is the text after the last quote
-    last_quote = generated_so_far.rfind('"')
-    name_so_far = generated_so_far[last_quote + 1:]
+    name_so_far = text_after_last_quote(generated_so_far)
 
     # get current state
     if char in TRANSITIONS.get(state, {}):
@@ -103,11 +119,8 @@ def next_state(
 
     if state == State.F_PARAM:
         # skip past the function name, so we only look at the text after it
-        if func_name is not None:
-            find_func = generated_so_far.find(func_name + '"')
-            after_func_name = generated_so_far[find_func + len(func_name)
-                                               + 1:]
-        else:
+        after_func_name = find_after_name(generated_so_far, func_name)
+        if after_func_name is None:
             return None
 
     if (
@@ -240,6 +253,38 @@ def allowed_tokens(
             valid_tokens.add(token_id)
 
     return valid_tokens
+
+
+def get_allowed_tokens(
+        cache: dict[tuple, set[int]],
+        state: State,
+        vocab: dict[str, int],
+        generated_so_far: str,
+        options: list[str],
+        param_type: str | None,
+        func_name: str | None = None
+) -> set[int]:
+    text = None
+    key_options = None
+    key_type = None
+
+    if state == State.F_START:
+        text = generated_so_far
+    elif state in (State.F_NAME, State.P_NAME):
+        text = text_after_last_quote(generated_so_far)
+        key_options = tuple(options)
+    elif state == State.F_PARAM:
+        text = find_after_name(generated_so_far, func_name)
+    elif state == State.P_COLON:
+        key_type = param_type
+
+    key = (state, text, key_options, key_type)
+    if key in cache:
+        return cache[key]
+    result = allowed_tokens(state, vocab, generated_so_far, options, param_type, func_name
+                            )
+    cache[key] = result
+    return result
 
 
 def extract_value_after_pattern(

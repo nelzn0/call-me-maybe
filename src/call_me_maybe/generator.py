@@ -10,7 +10,8 @@ from typing import Any, TypeVar
 from collections.abc import Callable
 from call_me_maybe.decoder import (
     State, allowed_tokens, walk_token,
-    extract_value_after_pattern, is_json_complete, allow_char_temp
+    extract_value_after_pattern, is_json_complete, allow_char_temp,
+    get_allowed_tokens
 )
 
 
@@ -450,6 +451,8 @@ def generate(
         raise ValueError(f"Could not load the model: {e}")
 
     vocab_invert = invert_vocab(vocab)
+
+    token_cache = get_allowed_tokens(cache, state, vocab, generated_so_far, options, param_type, func_name)
 
     functions = build_functions_text(func_defs)
 
