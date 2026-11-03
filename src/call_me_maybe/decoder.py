@@ -48,7 +48,10 @@ escape_chars = '"\\/bfnrt'
 allow_char_temp = (
     string.ascii_letters + string.punctuation + ' ' + string.digits
 ).replace('\\', '')
-allowed_in_string = allow_char_temp.replace('"', '')
+allowed_in_string_rq = allow_char_temp.replace('"', '')
+allowed_in_string_rb = allowed_in_string_rq.replace('{', '')
+allowed_in_string = allowed_in_string_rb.replace('}', '')
+
 
 CACHE_TYPE = dict[tuple[State, str | None,
                         tuple[str, ...] | None, str | None], set[int]]
@@ -243,6 +246,13 @@ def walk_token(
         if prev_state == State.P_COLON:
             if c == ':' and i != len(token_text) - 1:
                 return None
+        if (
+            prev_state == State.P_NAME
+            and new_state == State.P_COLON
+            and i != len(token_text) - 1
+        ):
+            return None
+
         generated_so_far += c
 
     return state, prev_state

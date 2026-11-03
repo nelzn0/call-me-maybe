@@ -93,11 +93,12 @@ The state is stored in an explicit variable and updated after every token by `wa
 4. **Parameters key:** the letters of `parameters`, then its closing quote.
 5. **After the key:** a colon, then a space or `{`, then `{`.
 6. **Parameter names:** the letters of the valid parameter names for the
-   chosen function. Once a name is closed, a colon is allowed.
+   chosen function. Once a name is closed, a colon is allowed. The closing
+   quote must be the last character of its token, so a token like `":` is
+   rejected and the colon comes in a later token.
 7. **Parameter values:** the parameter's type comes from the schema. `number` allows spaces, digits, and `-` after the colon. After a digit, it allows more digits, one `.` followed by digits, `,`, or `}`. `string` allows spaces, then `"` after the colon to open the value. Inside the string, the allowed tokens come from the precomputed vocabulary list. After the closing `"`, only `,` or `}` is allowed.
 
-The first parameter name is found after `"parameters": {"`. Later parameter
-names are found after `, "`, using the last occurrence.
+A parameter name is read when its closing quote is walked. `generate_call()` takes the text up to the closing quote, which includes the chosen token minus its last character, and then the text after the last quote, using `text_after_last_quote()`. It looks up that name in the schema and uses its type. A name that is not in the function's parameters raises a `ValueError`. This keeps a token such as `b"` from losing its letter.
 
 Before generation, `get_vocabulary()` builds a dict of token text to token ID, keeping only tokens whose text uses allowed characters, once per run. The `Ġ` marker becomes a space before the check.
 
@@ -274,7 +275,7 @@ The `get_allowed_tokens()` function wraps `allowed_tokens()` with a cache:
 - The cache is a dict created once per run in `generate()` and passed into each `generate_call()`.
 - The key is a tuple of four slots: the state, a text value, the options as a tuple, and the parameter type. Each state fills only the slots its branch in `next_state()` reads, and leaves the others as `None`.
 - The cache's type is named `CACHE_TYPE` in `decoder.py`, and `generator.py` uses the same name.
-- `F_NAME` and `P_NAME` use the text typed since the last quote and the options. `F_PARAM` uses the text after the function name, found by `find_after_name()`. `F_START` uses the full text generated so far, so its keys may not repeat. [TODO: check whether F_START keys repeat across prompts] `P_COLON` uses the parameter type. Other states use only the state.
+- `F_NAME` and `P_NAME` use the text typed since the last quote and the options. `F_PARAM` uses the text after the function name, found by `find_after_name()`. `F_START` uses the full text generated so far, so identical text gives the same key in every prompt. `P_COLON` uses the parameter type. Other states use only the state.
 - On a hit, the stored set is returned. On a miss, `allowed_tokens()` computes the set, which is stored and returned.
 
 ### Escapes and Strings
@@ -304,11 +305,11 @@ Used Pydantic models to validate input JSON files at load time. This catches mal
 
 ### State Machine Pattern
 
-The constrained decoding is a state machine. `decoder.py` contains a `State` enum (including the outer `F_START`, `F_NAME`, and `F_PARAM` states), a transition table, and `next_state()`, which covers the outer object, function name, parameter names, colon, string, and number states. `walk_token()` runs one candidate token through `next_state()`, and `allowed_tokens()` collects the IDs of the vocabulary tokens that pass. `generator.py` has `find_function()`, which looks up the chosen function, `capture_function_name()` and `capture_param_name()`, which read the names from the generated text, and `pick_token()`, which masks the logits with `mask_logits()`, picks the highest one, and returns its ID and text. `build_functions_text()`, `build_prompt()`, `invert_vocab()`, and `write_result()` handle the prompt and the output file. `generate_call()` runs the token loop for one prompt with an explicit state variable, passing the chosen function name to `get_allowed_tokens()` and `walk_token()`, and returns the parsed JSON. If exactly one token is valid, `generate_call()` skips the model for that step (see Forced Steps). `generate()` loads the files, builds the vocabulary once, calls `generate_call()` for each prompt, and writes the results. It takes an optional `on_result` callback, which it calls with the prompt's position, the total count, and the result after each successful prompt, and it returns the list of results. `cli.py` uses the callback to print each result. `walk_token()` returns the state after the token and the state before its last character, and `generate_call()` uses the second value to record where a parameter name began.
+The constrained decoding is a state machine. `decoder.py` contains a `State` enum (including the outer `F_START`, `F_NAME`, and `F_PARAM` states), a transition table, and `next_state()`, which covers the outer object, function name, parameter names, colon, string, and number states. `walk_token()` runs one candidate token through `next_state()`, and `allowed_tokens()` collects the IDs of the vocabulary tokens that pass. `generator.py` has `find_function()`, which looks up the chosen function, `capture_function_name()`, which reads the function name from the generated text, and `pick_token()`, which masks the logits with `mask_logits()`, picks the highest one, and returns its ID and text. `build_functions_text()`, `build_prompt()`, `invert_vocab()`, and `write_result()` handle the prompt and the output file. `generate_call()` runs the token loop for one prompt with an explicit state variable, passing the chosen function name to `get_allowed_tokens()` and `walk_token()`, and returns the parsed JSON. If exactly one token is valid, `generate_call()` skips the model for that step (see Forced Steps). `generate()` loads the files, builds the vocabulary once, calls `generate_call()` for each prompt, and writes the results. It takes an optional `on_result` callback, which it calls with the prompt's position, the total count, and the result after each successful prompt, and it returns the list of results. `cli.py` uses the callback to print each result. `walk_token()` returns the state after the token and the state before its last character. `generate_call()` uses only the first value. `walk_token()` also rejects a token in which the closing quote of a parameter name is followed by more characters.
 
 ### Error Handling
 
-Each prompt is handled on its own. If `generate_call()` raises a `ValueError` (no valid token, no matching function or parameter, or the JSON is not finished after `MAX_TOKENS`), `generate()` prints the prompt and the reason, then moves on. The output can therefore have fewer entries than the input. [TODO: a parameter name missing from the schema can raise a KeyError, which `generate()` does not catch]
+Each prompt is handled on its own. If `generate_call()` raises a `ValueError` (no valid token, no matching function or parameter, or the JSON is not finished after `MAX_TOKENS`), `generate()` prints the prompt and the reason, then moves on. `generate()` also catches `KeyError`, so an unexpected missing key fails only its own prompt. The output can therefore have fewer entries than the input.
 
 `cli.py` handles missing or invalid input files and output write errors. It prints one error line to stderr and exits with code 1.
 
@@ -317,11 +318,12 @@ Each prompt is handled on its own. If `generate_call()` raises a `ValueError` (n
 - Function selection and argument extraction were checked only on the 11 prompts in `data/input/function_calling_tests.json`. [TODO: rerun on all 11 prompts and record the result]. Other prompts are untested, and the final choice is the model's.
 - Only `number` and `string` parameter types are supported. Other types (for example `boolean`) stop generation with an error.
 - Functions with no parameters are not supported.
-- String values cannot contain `"` or `\`, and characters outside ASCII are not in the vocabulary used for string values.
+- String values cannot contain `"`, `\`, `{`, or `}`, and characters outside ASCII are not in the vocabulary used for string values.
 - Escape sequences are not supported. Backslashes are removed from string content.
 - The state machine in `decoder.py` plans to support escape sequences other than `\u`. `\u` is not accepted because `u` is not in the list of escape characters, and the test prompts do not need it.
-- String values can currently contain `{` and `}`, because they are in the vocabulary used for string values. `is_json_complete()` counts raw braces, so a brace inside a value can end generation too early. [TODO: fix this and confirm it with a test prompt]
-- Model loading errors of type `OSError` or `RuntimeError` are caught in `generate()` and reported as a `ValueError`. Other exceptions are not caught in `cli.py` yet. [TODO: check which other errors model loading can raise]
+- `{` and `}` are removed from the characters allowed in string values, so `is_json_complete()` never sees a brace inside a value. Values such as `{x}` cannot be produced.
+- Any exception raised while loading the model or the vocabulary is caught in `generate()` and reported as a `ValueError`.
+- A top-level JSON value that is not an array in the input files is rejected with a clear `ValueError`.
 
 ## Performance Analysis
 
@@ -364,7 +366,7 @@ All 11 outputs were checked by hand against the function schema (function names 
 
 ## Testing Strategy
 
-- Helper checks: `build_functions_text()`, `build_prompt()`, `invert_vocab()`, `mask_logits()`, `find_function()`, `capture_function_name()`, `capture_param_name()`, and `write_result()` were checked by hand against the real input files. These are not yet written as unit tests. [TODO: add unit tests]
+- Helper checks: `build_functions_text()`, `build_prompt()`, `invert_vocab()`, `mask_logits()`, `find_function()`, `capture_function_name()`, and `write_result()` were checked by hand against the real input files. These are not yet written as unit tests. [TODO: add unit tests]
 - Full run: the 11-prompt test file was re-run after the prompt changes, and the output is identical to the earlier run in `data/output/function_calling_results_before.json`. The run after the forced-step skip was also compared with `diff` and was identical. The vowel prompt uses the regex `([aeiouAEIOU])`.
 - Validation of output JSON structure using Python's json module.
 - Edge case testing (TO-DO)

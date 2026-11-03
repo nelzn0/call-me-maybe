@@ -11,7 +11,7 @@ from collections.abc import Callable
 from call_me_maybe.decoder import (
     State, walk_token, extract_value_after_pattern,
     is_json_complete, allow_char_temp,
-    get_allowed_tokens, CACHE_TYPE
+    get_allowed_tokens, CACHE_TYPE, text_after_last_quote
 )
 
 
@@ -49,6 +49,10 @@ def load_json_data(
         with open(file_path) as f:
             try:
                 out = json.load(f)
+                if not isinstance(out, list):
+                    raise ValueError(
+                        f"Error: {file_path} must contain a valid JSON array"
+                    )
                 for i in out:
                     try:
                         data = model_class.model_validate(i)
@@ -277,37 +281,6 @@ def capture_function_name(
     return chosen_func
 
 
-def capture_param_name(
-    generated_text: str,
-    chosen_text: str,
-    name_start_state: State | None,
-) -> str | None:
-    """Gets the name of the parameter we're on right now.
-
-    The first parameter comes after '"parameters": {"'. Later ones come
-    after ', "', so we take the last one.
-
-    Args:
-        generated_text: The text generated before this token
-        chosen_text: The token we just picked
-        name_start_state: The state where the parameter name started
-
-    Returns:
-        The parameter name, or None if we can't find it
-    """
-
-    if name_start_state == State.P_OPEN:
-        param_name = extract_value_after_pattern(
-            generated_text + chosen_text, '"parameters": {"', ['"']
-        )
-    else:
-        param_name = extract_value_after_pattern(
-            generated_text + chosen_text, ', "', ['"'], False
-        )
-
-    return param_name
-
-
 def generate_call(
     llm_model: Small_LLM_Model,
     vocab: dict[str, int],
@@ -342,7 +315,6 @@ def generate_call(
     func_name = None
     state = State.F_START
     param_type = None
-    name_start_state = None
 
     for _ in range(MAX_TOKENS):
 
@@ -375,11 +347,7 @@ def generate_call(
             state, chosen_text, generated_text, options, param_type, func_name
         )
         if walk_result is not None:
-            new_state, prev_state = walk_result
-            # remember where the parameter name starts,
-            # capture_param_name needs it
-            if new_state == State.P_NAME and state != State.P_NAME:
-                name_start_state = prev_state
+            new_state, _ = walk_result
             # the function name is done, so look up its definition
             # and its parameters
             if state == State.F_NAME and new_state == State.F_PARAM:
@@ -393,14 +361,13 @@ def generate_call(
             # the parameter name is done, so look up its type
             # in the functions definition
             if state == State.P_NAME and new_state == State.P_COLON:
-                param_name = capture_param_name(
-                    generated_text, chosen_text, name_start_state
+                param_name = text_after_last_quote(
+                    (generated_text + chosen_text)[:-1]
                 )
-                if param_name is None:
-                    raise ValueError(
-                        "Unable to find chosen function parameter"
-                    )
-                if chosen_func is None:
+                if (
+                    chosen_func is None
+                    or param_name not in chosen_func.parameters
+                ):
                     raise ValueError("Unable to find chosen function")
                 param_type = chosen_func.parameters[param_name].type
             state = new_state
@@ -447,7 +414,7 @@ def generate(
 
         # builds the vocab list once, before the prompt loop
         vocab = get_vocabulary(allow_char_temp, llm_model)
-    except (OSError, RuntimeError) as e:
+    except Exception as e:
         raise ValueError(f"Could not load the model: {e}")
 
     vocab_invert = invert_vocab(vocab)
@@ -475,7 +442,7 @@ def generate(
             if on_result is not None:
                 print("")
                 on_result(index, total, entry)
-        except ValueError as e:
+        except (ValueError, KeyError) as e:
             print(f"Prompt: '{current_input.prompt}' - Failed because {e}",
                   file=sys.stderr)
 
