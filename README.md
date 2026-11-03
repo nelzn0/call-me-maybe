@@ -10,7 +10,7 @@ The project demonstrates how constrained decoding can make small language models
 
 ### Prerequisites
 
-- Python 3.12+
+- Python 3.10+
 - uv package manager
 
 ### Installation
@@ -21,7 +21,7 @@ uv sync
 
 This installs numpy, pydantic, accelerate, and llm-sdk. llm-sdk brings in torch, transformers, and huggingface-hub.
 
-[TODO: add a Makefile with install, run, debug, clean, lint, and lint-strict rules]
+The Makefile provides these rules: `make install`, `make run`, `make debug`, `make clean`, `make lint`, and `make lint-strict`.
 
 ### Running the Program
 
@@ -264,6 +264,14 @@ The `allowed_tokens()` function:
 
 This ensures the model can only generate tokens that lead to valid JSON structure and schema compliance.
 
+### Allowed-Token Cache
+
+The `get_allowed_tokens()` function wraps `allowed_tokens()` with a cache:
+- The cache is a dict created once per run in `generate()` and passed into each `generate_call()`.
+- The key is a tuple of four slots: the state, a text value, the options as a tuple, and the parameter type. Each state fills only the slots its branch in `next_state()` reads, and leaves the others as `None`.
+- `F_NAME` and `P_NAME` use the text typed since the last quote and the options. `F_PARAM` uses the text after the function name, found by `find_after_name()`. `F_START` uses the full text generated so far, so its keys rarely repeat. `P_COLON` uses the parameter type. Other states use only the state.
+- On a hit, the stored set is returned. On a miss, `allowed_tokens()` computes the set, which is stored and returned.
+
 ### Escapes and Strings
 
 Inside a string, `next_state()` has an escape path: a `\` moves to `IN_ESCAPE`, and the next character must be one of `"\/bfnrt`. Backslash is not in the vocabulary used for string values, so this path is not reachable yet.
@@ -283,7 +291,7 @@ This separation makes each component testable and maintainable.
 
 ### Generic Helper Functions
 
-Created reusable functions like `extract_value_after_pattern()` and `allowed_tokens()` that work for both function names and parameter names. This reduces code duplication and makes the state machine easier to extend.
+Created reusable functions like `extract_value_after_pattern()` and `allowed_tokens()` that work for both function names and parameter names. `text_after_last_quote()` and `find_after_name()` are shared by `next_state()` and the cache key, so both read the same text. This reduces code duplication and makes the state machine easier to extend.
 
 ### Pydantic for Validation
 
@@ -301,7 +309,7 @@ Each prompt is handled on its own. If `generate_call()` raises a `ValueError` (n
 
 ## Known Limitations
 
-- Function selection and argument extraction were checked only on the 10 prompts in `data/input/function_calling_tests.json` (10 of 10 in the latest run). Other prompts are untested, and the final choice is the model's.
+- Function selection and argument extraction were checked only on the 11 prompts in `data/input/function_calling_tests.json`. [TODO: rerun on all 11 prompts and record the result]. Other prompts are untested, and the final choice is the model's.
 - Only `number` and `string` parameter types are supported. Other types (for example `boolean`) stop generation with an error.
 - Functions with no parameters are not supported.
 - String values cannot contain `"` or `\`, and characters outside ASCII are not in the vocabulary used for string values.
@@ -315,13 +323,13 @@ Each prompt is handled on its own. If `generate_call()` raises a `ValueError` (n
 [TODO: Add performance metrics after completing the implementation]
 
 ### Accuracy
-In the latest run, all 10 prompts in `data/input/function_calling_tests.json` got the expected function and parameters. This is a small test set, so it doesn't show accuracy on other prompts.
+[TODO: rerun on the 11 prompts in `data/input/function_calling_tests.json` and record how many got the expected function and parameters]. This is a small test set, so it doesn't show accuracy on other prompts.
 
 ### Speed
 [TODO: Measure tokens per second and total processing time]
 
 ### Reliability
-All 10 outputs parsed as JSON and matched the function schema (function names and parameter types). This was measured on the test file only.
+[TODO: confirm that all 11 outputs parse as JSON and match the function schema (function names and parameter types) after the latest changes]. This is measured on the test file only.
 
 ## Challenges Faced
 
@@ -352,7 +360,7 @@ All 10 outputs parsed as JSON and matched the function schema (function names an
 ## Testing Strategy
 
 - Helper checks: `build_functions_text()`, `build_prompt()`, `invert_vocab()`, `mask_logits()`, `find_function()`, `capture_function_name()`, `capture_param_name()`, and `write_result()` were checked by hand against the real input files. These are not yet written as unit tests. [TODO: add unit tests]
-- Full run: the 10-prompt test file produces valid output after the refactor. The output matches the previous run, except the vowel prompt, which now uses the regex `([aeiouAEIOU])`.
+- Full run: [TODO: rerun the 11-prompt test file after the allowed-token cache change and confirm the output is unchanged from the previous run]. The vowel prompt uses the regex `([aeiouAEIOU])`.
 - Validation of output JSON structure using Python's json module.
 - Edge case testing (TO-DO)
 

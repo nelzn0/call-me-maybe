@@ -52,6 +52,17 @@ allowed_in_string = allow_char_temp.replace('"', '')
 
 
 def find_after_name(generated_so_far: str, func_name: str | None) -> str | None:
+    """Gets the text typed after the function name.
+
+    Only the part after the name is checked for `, "parameters": {`.
+
+    Args:
+        generated_so_far: All the text generated so far
+        func_name: The chosen function's name, or None if we don't have one yet
+
+    Returns:
+        The text after the name, or None if there's no name or it isn't in the text
+    """
     if func_name is not None:
         name_start = generated_so_far.find(func_name + '"')
         if name_start < 0:
@@ -62,6 +73,16 @@ def find_after_name(generated_so_far: str, func_name: str | None) -> str | None:
 
 
 def text_after_last_quote(generated_so_far: str) -> str:
+    """Gets the text typed after the last quote.
+
+    If there's no quote yet, it gives back the whole text.
+
+    Args:
+        generated_so_far: All the text generated so far
+
+    Returns:
+        The text after the last quote, or the whole text if there isn't one
+    """
     last_quote = generated_so_far.rfind('"')
     name_so_far = generated_so_far[last_quote + 1:]
 
@@ -264,10 +285,28 @@ def get_allowed_tokens(
         param_type: str | None,
         func_name: str | None = None
 ) -> set[int]:
+    """Same as allowed_tokens, but reuses the answer if the key was seen before.
+
+    The key only holds the inputs this state reads, so the same key always
+    gives the same set of tokens.
+
+    Args:
+        cache: Saved results, keyed by state and the inputs it reads
+        state: The state we're in right now
+        vocab: Maps token text to token ID
+        generated_so_far: All the text generated so far
+        options: The names we can pick from
+        param_type: The type of the current parameter
+        func_name: The chosen function's name, if we have one
+
+    Returns:
+        The set of token IDs we're allowed to pick
+    """
     text = None
     key_options = None
     key_type = None
 
+    # states that don't read these inputs leave them as None
     if state == State.F_START:
         text = generated_so_far
     elif state in (State.F_NAME, State.P_NAME):

@@ -325,6 +325,7 @@ def generate_call(
     vocab_invert: dict[int, str],
     func_defs: list[FunctionDefinition],
     prompt: str,
+    cache: dict[tuple, set[int]]
 ) -> dict[str, Any]:
     """Runs the token loop for one prompt and returns the parsed JSON.
 
@@ -360,8 +361,8 @@ def generate_call(
         generated_text = llm_model.decode(output_ids)
 
         # valid tokens depend on the JSON generated so far
-        valid_tokens = allowed_tokens(
-            state, vocab, generated_text, options, param_type, func_name
+        valid_tokens = get_allowed_tokens(
+            cache, state, vocab, generated_text, options, param_type, func_name
         )
 
         if not valid_tokens:
@@ -452,7 +453,7 @@ def generate(
 
     vocab_invert = invert_vocab(vocab)
 
-    token_cache = get_allowed_tokens(cache, state, vocab, generated_so_far, options, param_type, func_name)
+    cache: dict[tuple, set[int]] = {}
 
     functions = build_functions_text(func_defs)
 
@@ -467,7 +468,7 @@ def generate(
             # prompt goes first so it's the first key in the output
             entry["prompt"] = current_input.prompt
             parsed_result = generate_call(
-                llm_model, vocab, vocab_invert, func_defs, prompt
+                llm_model, vocab, vocab_invert, func_defs, prompt, cache
             )
             entry.update(parsed_result)
             final_result.append(entry)
