@@ -50,8 +50,12 @@ allow_char_temp = (
 ).replace('\\', '')
 allowed_in_string = allow_char_temp.replace('"', '')
 
+CACHE_TYPE = dict[tuple[State, str | None,
+                        tuple[str, ...] | None, str | None], set[int]]
 
-def find_after_name(generated_so_far: str, func_name: str | None) -> str | None:
+
+def find_after_name(generated_so_far: str, func_name: str | None
+                    ) -> str | None:
     """Gets the text typed after the function name.
 
     Only the part after the name is checked for `, "parameters": {`.
@@ -61,7 +65,8 @@ def find_after_name(generated_so_far: str, func_name: str | None) -> str | None:
         func_name: The chosen function's name, or None if we don't have one yet
 
     Returns:
-        The text after the name, or None if there's no name or it isn't in the text
+        The text after the name,
+        or None if there's no name or it isn't in the text
     """
     if func_name is not None:
         name_start = generated_so_far.find(func_name + '"')
@@ -146,12 +151,15 @@ def next_state(
 
     if (
         state == State.F_PARAM
+        and after_func_name is not None
         and ', "parameters": {' == (after_func_name + char)
     ):
         return State.P_OPEN
 
-    if state == State.F_PARAM and (
-        ', "parameters": {'.startswith(after_func_name + char)
+    if (
+        state == State.F_PARAM
+        and after_func_name is not None
+        and (', "parameters": {'.startswith(after_func_name + char))
     ):
         return State.F_PARAM
 
@@ -277,7 +285,7 @@ def allowed_tokens(
 
 
 def get_allowed_tokens(
-        cache: dict[tuple, set[int]],
+        cache: CACHE_TYPE,
         state: State,
         vocab: dict[str, int],
         generated_so_far: str,
@@ -285,7 +293,8 @@ def get_allowed_tokens(
         param_type: str | None,
         func_name: str | None = None
 ) -> set[int]:
-    """Same as allowed_tokens, but reuses the answer if the key was seen before.
+    """Same as allowed_tokens, but
+    reuses the answer if the key was seen before.
 
     The key only holds the inputs this state reads, so the same key always
     gives the same set of tokens.
@@ -320,7 +329,8 @@ def get_allowed_tokens(
     key = (state, text, key_options, key_type)
     if key in cache:
         return cache[key]
-    result = allowed_tokens(state, vocab, generated_so_far, options, param_type, func_name
+    result = allowed_tokens(state, vocab, generated_so_far,
+                            options, param_type, func_name
                             )
     cache[key] = result
     return result

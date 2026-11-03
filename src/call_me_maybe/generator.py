@@ -9,9 +9,9 @@ import os
 from typing import Any, TypeVar
 from collections.abc import Callable
 from call_me_maybe.decoder import (
-    State, allowed_tokens, walk_token,
-    extract_value_after_pattern, is_json_complete, allow_char_temp,
-    get_allowed_tokens
+    State, walk_token, extract_value_after_pattern,
+    is_json_complete, allow_char_temp,
+    get_allowed_tokens, CACHE_TYPE
 )
 
 
@@ -139,17 +139,12 @@ def build_functions_text(func_defs: list[FunctionDefinition]) -> str:
 
     functions = ""
     for f in func_defs:
-        para = {}
-        for param_name, param_type in f.parameters.items():
-            para[param_name] = param_type.type
 
-        functions += f"""
-
-Function name: {f.name}
-Description: {f.description}
-Parameters: {json.dumps(para)}
-
-"""
+        functions += (
+            f"Function name: {f.name}\n"
+            f"Description: {f.description}\n"
+            f"Parameters: {', '.join(f.parameters)}\n"
+        )
 
     return functions
 
@@ -165,19 +160,13 @@ def build_prompt(functions_text: str, user_prompt: str) -> str:
         The full prompt we send to the model
     """
 
-    prompt = f"""You have access to the following functions:
-
-Available functions:
+    prompt = f"""Available functions:
 
 {functions_text}
 
-Given the user's question, respond with a JSON object specifying which
-function to call and with what parameters.
-
 User question: {user_prompt}
 
-Respond ONLY with a JSON object in this format using the appropriate \
-function to the user's question:
+Respond ONLY with a JSON object in this format:
 {{"name": "function_name", "parameters": {{...}}}}
 
 Response: """
@@ -325,7 +314,7 @@ def generate_call(
     vocab_invert: dict[int, str],
     func_defs: list[FunctionDefinition],
     prompt: str,
-    cache: dict[tuple, set[int]]
+    cache: CACHE_TYPE
 ) -> dict[str, Any]:
     """Runs the token loop for one prompt and returns the parsed JSON.
 
@@ -335,6 +324,7 @@ def generate_call(
         vocab_invert: Maps token ID back to token text
         func_defs: The function definitions to pick from
         prompt: The full prompt, from build_prompt
+        cache: saved results from get_allowed_tokens
 
     Returns:
         The JSON object the model built, as a dict
@@ -355,8 +345,6 @@ def generate_call(
     name_start_state = None
 
     for _ in range(MAX_TOKENS):
-        full_context = input_ids + output_ids
-        logits = llm_model.get_logits_from_input_ids(full_context)
 
         generated_text = llm_model.decode(output_ids)
 
@@ -368,9 +356,20 @@ def generate_call(
         if not valid_tokens:
             raise ValueError("No valid tokens found")
 
-        best_token_id, chosen_text = pick_token(
-            logits, valid_tokens, vocab_invert
-        )
+        # if theres only 1 valid_token, force it without
+        # calling the model
+        if len(valid_tokens) == 1:
+            for i in valid_tokens:
+                best_token_id = i
+                chosen_text = vocab_invert[best_token_id]
+        else:
+            full_context = input_ids + output_ids
+
+            logits = llm_model.get_logits_from_input_ids(full_context)
+
+            best_token_id, chosen_text = pick_token(
+                logits, valid_tokens, vocab_invert
+            )
 
         walk_result = walk_token(
             state, chosen_text, generated_text, options, param_type, func_name
@@ -453,7 +452,7 @@ def generate(
 
     vocab_invert = invert_vocab(vocab)
 
-    cache: dict[tuple, set[int]] = {}
+    cache: CACHE_TYPE = {}
 
     functions = build_functions_text(func_defs)
 

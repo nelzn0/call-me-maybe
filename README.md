@@ -264,12 +264,17 @@ The `allowed_tokens()` function:
 
 This ensures the model can only generate tokens that lead to valid JSON structure and schema compliance.
 
+### Forced Steps
+
+`generate_call()` computes the valid tokens before it asks the model for logits. If exactly one token is valid, that token is chosen directly, and the model is not called for that step. The chosen token still goes through `walk_token()`, is appended to the output, and is checked by `is_json_complete()`, the same as a token picked by the model. Since the mask leaves only one token, the model's scores could not change the choice.
+
 ### Allowed-Token Cache
 
 The `get_allowed_tokens()` function wraps `allowed_tokens()` with a cache:
 - The cache is a dict created once per run in `generate()` and passed into each `generate_call()`.
 - The key is a tuple of four slots: the state, a text value, the options as a tuple, and the parameter type. Each state fills only the slots its branch in `next_state()` reads, and leaves the others as `None`.
-- `F_NAME` and `P_NAME` use the text typed since the last quote and the options. `F_PARAM` uses the text after the function name, found by `find_after_name()`. `F_START` uses the full text generated so far, so its keys rarely repeat. `P_COLON` uses the parameter type. Other states use only the state.
+- The cache's type is named `CACHE_TYPE` in `decoder.py`, and `generator.py` uses the same name.
+- `F_NAME` and `P_NAME` use the text typed since the last quote and the options. `F_PARAM` uses the text after the function name, found by `find_after_name()`. `F_START` uses the full text generated so far, so its keys may not repeat. [TODO: check whether F_START keys repeat across prompts] `P_COLON` uses the parameter type. Other states use only the state.
 - On a hit, the stored set is returned. On a miss, `allowed_tokens()` computes the set, which is stored and returned.
 
 ### Escapes and Strings
@@ -299,11 +304,11 @@ Used Pydantic models to validate input JSON files at load time. This catches mal
 
 ### State Machine Pattern
 
-The constrained decoding is a state machine. `decoder.py` contains a `State` enum (including the outer `F_START`, `F_NAME`, and `F_PARAM` states), a transition table, and `next_state()`, which covers the outer object, function name, parameter names, colon, string, and number states. `walk_token()` runs one candidate token through `next_state()`, and `allowed_tokens()` collects the IDs of the vocabulary tokens that pass. `generator.py` has `find_function()`, which looks up the chosen function, `capture_function_name()` and `capture_param_name()`, which read the names from the generated text, and `pick_token()`, which masks the logits with `mask_logits()`, picks the highest one, and returns its ID and text. `build_functions_text()`, `build_prompt()`, `invert_vocab()`, and `write_result()` handle the prompt and the output file. `generate_call()` runs the token loop for one prompt with an explicit state variable, passing the chosen function name to `allowed_tokens()` and `walk_token()`, and returns the parsed JSON. `generate()` loads the files, builds the vocabulary once, calls `generate_call()` for each prompt, and writes the results. It takes an optional `on_result` callback, which it calls with the prompt's position, the total count, and the result after each successful prompt, and it returns the list of results. `cli.py` uses the callback to print each result. `walk_token()` returns the state after the token and the state before its last character, and `generate_call()` uses the second value to record where a parameter name began.
+The constrained decoding is a state machine. `decoder.py` contains a `State` enum (including the outer `F_START`, `F_NAME`, and `F_PARAM` states), a transition table, and `next_state()`, which covers the outer object, function name, parameter names, colon, string, and number states. `walk_token()` runs one candidate token through `next_state()`, and `allowed_tokens()` collects the IDs of the vocabulary tokens that pass. `generator.py` has `find_function()`, which looks up the chosen function, `capture_function_name()` and `capture_param_name()`, which read the names from the generated text, and `pick_token()`, which masks the logits with `mask_logits()`, picks the highest one, and returns its ID and text. `build_functions_text()`, `build_prompt()`, `invert_vocab()`, and `write_result()` handle the prompt and the output file. `generate_call()` runs the token loop for one prompt with an explicit state variable, passing the chosen function name to `get_allowed_tokens()` and `walk_token()`, and returns the parsed JSON. If exactly one token is valid, `generate_call()` skips the model for that step (see Forced Steps). `generate()` loads the files, builds the vocabulary once, calls `generate_call()` for each prompt, and writes the results. It takes an optional `on_result` callback, which it calls with the prompt's position, the total count, and the result after each successful prompt, and it returns the list of results. `cli.py` uses the callback to print each result. `walk_token()` returns the state after the token and the state before its last character, and `generate_call()` uses the second value to record where a parameter name began.
 
 ### Error Handling
 
-Each prompt is handled on its own. If `generate_call()` raises a `ValueError` (no valid token, no matching function or parameter, or the JSON is not finished after `MAX_TOKENS`), `generate()` prints the prompt and the reason, then moves on. The output can therefore have fewer entries than the input.
+Each prompt is handled on its own. If `generate_call()` raises a `ValueError` (no valid token, no matching function or parameter, or the JSON is not finished after `MAX_TOKENS`), `generate()` prints the prompt and the reason, then moves on. The output can therefore have fewer entries than the input. [TODO: a parameter name missing from the schema can raise a KeyError, which `generate()` does not catch]
 
 `cli.py` handles missing or invalid input files and output write errors. It prints one error line to stderr and exits with code 1.
 
@@ -314,22 +319,22 @@ Each prompt is handled on its own. If `generate_call()` raises a `ValueError` (n
 - Functions with no parameters are not supported.
 - String values cannot contain `"` or `\`, and characters outside ASCII are not in the vocabulary used for string values.
 - Escape sequences are not supported. Backslashes are removed from string content.
-- The state machine in `decoder.py` plans to support escape sequences other than `\u`, which is deliberately rejected because the test prompts do not need it.
+- The state machine in `decoder.py` plans to support escape sequences other than `\u`. `\u` is not accepted because `u` is not in the list of escape characters, and the test prompts do not need it.
 - String values can currently contain `{` and `}`, because they are in the vocabulary used for string values. `is_json_complete()` counts raw braces, so a brace inside a value can end generation too early. [TODO: fix this and confirm it with a test prompt]
-- Errors other than missing or invalid input files and output write errors are not caught in `cli.py` yet, for example model loading errors. [TODO: check which errors model loading can raise and handle them in `cli.py`]
+- Model loading errors of type `OSError` or `RuntimeError` are caught in `generate()` and reported as a `ValueError`. Other exceptions are not caught in `cli.py` yet. [TODO: check which other errors model loading can raise]
 
 ## Performance Analysis
 
 [TODO: Add performance metrics after completing the implementation]
 
 ### Accuracy
-[TODO: rerun on the 11 prompts in `data/input/function_calling_tests.json` and record how many got the expected function and parameters]. This is a small test set, so it doesn't show accuracy on other prompts.
+All 11 prompts in `data/input/function_calling_tests.json` produce a function name and parameters from the schema, and by inspection the chosen functions match the prompts. [TODO: score the results against the expected functions and parameters]. This is a small test set, so it doesn't show accuracy on other prompts.
 
 ### Speed
-[TODO: Measure tokens per second and total processing time]
+Measured with `time make run` on a GTX 1650, including model loading. The latest run, with the forced-step skip, took 4:14.38 for the 11 prompts, under the subject's 5-minute target. Earlier versions took 5:13 to 6:02. Those earlier runs generated 319 tokens at about 0.9 to 1.3 seconds per token. `nvidia-smi` showed the GPU at 99% utilization, so the forward pass over the full prompt is the main cost. [TODO: repeat the timing over more runs, and count the forced steps in a full run]
 
 ### Reliability
-[TODO: confirm that all 11 outputs parse as JSON and match the function schema (function names and parameter types) after the latest changes]. This is measured on the test file only.
+All 11 outputs were checked by hand against the function schema (function names and parameter names). [TODO: validate the outputs with a script using Python's json module]. This is measured on the test file only.
 
 ## Challenges Faced
 
@@ -360,7 +365,7 @@ Each prompt is handled on its own. If `generate_call()` raises a `ValueError` (n
 ## Testing Strategy
 
 - Helper checks: `build_functions_text()`, `build_prompt()`, `invert_vocab()`, `mask_logits()`, `find_function()`, `capture_function_name()`, `capture_param_name()`, and `write_result()` were checked by hand against the real input files. These are not yet written as unit tests. [TODO: add unit tests]
-- Full run: [TODO: rerun the 11-prompt test file after the allowed-token cache change and confirm the output is unchanged from the previous run]. The vowel prompt uses the regex `([aeiouAEIOU])`.
+- Full run: the 11-prompt test file was re-run after the prompt changes, and the output is identical to the earlier run in `data/output/function_calling_results_before.json`. The run after the forced-step skip was also compared with `diff` and was identical. The vowel prompt uses the regex `([aeiouAEIOU])`.
 - Validation of output JSON structure using Python's json module.
 - Edge case testing (TO-DO)
 

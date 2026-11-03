@@ -27,7 +27,7 @@ members = [
 llm-sdk = { workspace = true }
 
 [tool.mypy]
-exclude = ["llm_sdk", ".venv"]
+exclude = ["llm_sdk", ".venv", ".cache"]
 mypy_path = "llm_sdk"
 
 [dependency-groups]
