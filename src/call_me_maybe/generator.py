@@ -291,6 +291,9 @@ def generate_call(
 ) -> dict[str, Any]:
     """Runs the token loop for one prompt and returns the parsed JSON.
 
+    Each parameter name is removed from options once its closing quote is
+    done, so a name can't be used twice in the same call.
+
     Args:
         llm_model: The model we're generating with
         vocab: Maps token text to token ID
@@ -328,7 +331,7 @@ def generate_call(
         if not valid_tokens:
             raise ValueError("No valid tokens found")
 
-        # if theres only 1 valid_token, force it without
+        # if there's only 1 valid token, force it without
         # calling the model
         if len(valid_tokens) == 1:
             for i in valid_tokens:
@@ -369,8 +372,12 @@ def generate_call(
                     or param_name not in chosen_func.parameters
                 ):
                     raise ValueError("Unable to find chosen function")
+                # a parameter can only be used once, so remove its name
+                # from options
+                options.remove(param_name)
                 param_type = chosen_func.parameters[param_name].type
             state = new_state
+
         else:
             raise ValueError("No new states found")
 

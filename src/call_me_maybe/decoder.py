@@ -23,6 +23,8 @@ class State(Enum):
     NUM_INT = auto()
     NUM_DECIMAL_POINT = auto()
     NUM_DECIMAL = auto()
+    BOOL_OPEN = auto()
+    IN_BOOL = auto()
     DONE = auto()
 
 
@@ -41,6 +43,7 @@ TRANSITIONS: dict[State, dict[str, State]] = {
         '.': State.NUM_DECIMAL_POINT, ',': State.P_NEXT, '}': State.P_CLOSE
     },
     State.NUM_DECIMAL: {',': State.P_NEXT, '}': State.P_CLOSE},
+    State.BOOL_OPEN: {" ": State.BOOL_OPEN}
 }
 
 escape_chars = '"\\/bfnrt'
@@ -126,6 +129,22 @@ def next_state(
     # the name typed so far, which is the text after the last quote
     name_so_far = text_after_last_quote(generated_so_far)
 
+    # no parameters left, so a comma can't start another one
+    if (
+        not options and char == ','
+        and state in
+        (State.P_AFTER_VALUE, State.NUM_INT, State.NUM_DECIMAL)
+    ):
+        return None
+
+    # parameters still left, so the object can't be closed yet
+    if (
+            options and char == '}'
+            and state in
+            (State.P_AFTER_VALUE, State.NUM_INT, State.NUM_DECIMAL)
+    ):
+        return None
+
     # get current state
     if char in TRANSITIONS.get(state, {}):
         return TRANSITIONS[state][char]
@@ -178,7 +197,8 @@ def next_state(
     ):
         return State.NUM_DECIMAL
 
-    # only this function's parameter name are allowed
+    # only this function's parameter names are allowed. A name is removed
+    # from options once it's used, so it can't be picked again
     if state == State.P_NAME and any(
         opts.startswith(name_so_far + char) for opts in options
     ):
@@ -194,6 +214,9 @@ def next_state(
     if state == State.P_COLON and char == ':' and param_type == "number":
         return State.NUM_START
 
+    if state == State.P_COLON and char == ':' and param_type == "boolean":
+        return State.BOOL_OPEN
+
     # not reachable yet, since backslash isn't in the allowed characters
     if state == State.IN_ESCAPE and char in escape_chars:
         return State.IN_STRING
@@ -203,6 +226,46 @@ def next_state(
 
     if state == State.IN_STRING and char in allowed_in_string:
         return State.IN_STRING
+
+    # the letters typed after the colon, with the spaces removed
+    b_find = name_so_far.rfind(':')
+
+    # true and false are checked letter by letter
+    if (
+        state == State.BOOL_OPEN
+        and 't' == (name_so_far[b_find + 1:].strip() + char)
+    ):
+        return State.IN_BOOL
+
+    if (
+        state == State.BOOL_OPEN
+        and 'f' == (name_so_far[b_find + 1:].strip() + char)
+    ):
+        return State.IN_BOOL
+
+    if (
+        state == State.IN_BOOL
+        and 'true' == (name_so_far[b_find + 1:].strip() + char)
+    ):
+        return State.P_AFTER_VALUE
+
+    if (
+        state == State.IN_BOOL
+        and ('true'.startswith(name_so_far[b_find + 1:].strip() + char))
+    ):
+        return State.IN_BOOL
+
+    if (
+        state == State.IN_BOOL
+        and 'false' == (name_so_far[b_find + 1:].strip() + char)
+    ):
+        return State.P_AFTER_VALUE
+
+    if (
+        state == State.IN_BOOL
+        and ('false'.startswith(name_so_far[b_find + 1:].strip() + char))
+    ):
+        return State.IN_BOOL
 
     return None
 
@@ -218,7 +281,8 @@ def walk_token(
     """Runs a whole token through next_state, one character at a time.
 
     Stops as soon as one character is rejected. A colon has to be the
-    last character of the token.
+    last character of the token, and so does the closing quote of a
+    parameter name.
 
     Args:
         state: The state before the token
@@ -307,7 +371,8 @@ def get_allowed_tokens(
     reuses the answer if the key was seen before.
 
     The key only holds the inputs this state reads, so the same key always
-    gives the same set of tokens.
+    gives the same set of tokens. States whose tokens can run into a
+    parameter name also keep the remaining names in the key.
 
     Args:
         cache: Saved results, keyed by state and the inputs it reads
@@ -333,8 +398,16 @@ def get_allowed_tokens(
         key_options = tuple(options)
     elif state == State.F_PARAM:
         text = find_after_name(generated_so_far, func_name)
+        key_options = tuple(options)
     elif state == State.P_COLON:
         key_type = param_type
+    elif state == State.IN_BOOL:
+        b_find = generated_so_far.rfind(':')
+        text = generated_so_far[b_find + 1:].strip()
+    elif state in (State.P_AFTER_VALUE, State.NUM_INT, State.NUM_DECIMAL):
+        key_options = tuple(options)
+    elif state in (State.IN_STRING, State.P_NEXT, State.P_OPEN):
+        key_options = tuple(options)
 
     key = (state, text, key_options, key_type)
     if key in cache:

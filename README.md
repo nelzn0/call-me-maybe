@@ -93,10 +93,11 @@ The state is stored in an explicit variable and updated after every token by `wa
 4. **Parameters key:** the letters of `parameters`, then its closing quote.
 5. **After the key:** a colon, then a space or `{`, then `{`.
 6. **Parameter names:** the letters of the valid parameter names for the
-   chosen function. Once a name is closed, a colon is allowed. The closing
+   chosen function. Once a name is closed, a colon is allowed, and that name is removed from the list so it can't be used again. The closing
    quote must be the last character of its token, so a token like `":` is
    rejected and the colon comes in a later token.
-7. **Parameter values:** the parameter's type comes from the schema. `number` allows spaces, digits, and `-` after the colon. After a digit, it allows more digits, one `.` followed by digits, `,`, or `}`. `string` allows spaces, then `"` after the colon to open the value. Inside the string, the allowed tokens come from the precomputed vocabulary list. After the closing `"`, only `,` or `}` is allowed.
+7. **Parameter values:** the parameter's type comes from the schema. `number` allows spaces, digits, and `-` after the colon. After a digit, it allows more digits, one `.` followed by digits, `,`, or `}`. `string` allows spaces, then `"` after the colon to open the value. Inside the string, the allowed tokens come from the precomputed vocabulary list. After the closing `"`, the value is done. `boolean` allows spaces after the colon, then `t` or `f`. The letters have to spell `true` or `false`, and the full word ends the value.
+8. **After a value:** a `,` is allowed only while parameter names are left, and a `}` is allowed only after all of them are used. The model can't start an extra parameter or close the object early.
 
 A parameter name is read when its closing quote is walked. `generate_call()` takes the text up to the closing quote, which includes the chosen token minus its last character, and then the text after the last quote, using `text_after_last_quote()`. It looks up that name in the schema and uses its type. A name that is not in the function's parameters raises a `ValueError`. This keeps a token such as `b"` from losing its letter.
 
@@ -232,6 +233,29 @@ A backslash inside a string would move to `IN_ESCAPE`, but it is not reachable y
                                     | '}' --> P_CLOSE
 ```
 
+**Boolean value**:
+
+```
+  after ':'
+      |
+      v
+  +----------+
+  | BOOL_OPEN|<-- space  (stay)
+  +----------+
+      |
+      | 't' or 'f'
+      v
+  +----------+
+  | IN_BOOL  |<-- letters that still spell true or false  (stay)
+  +----------+
+      |
+      | last letter of true or false
+      v
+  +--------------+
+  |P_AFTER_VALUE |
+  +--------------+
+```
+
 **Closing**:
 
 ```
@@ -275,7 +299,11 @@ The `get_allowed_tokens()` function wraps `allowed_tokens()` with a cache:
 - The cache is a dict created once per run in `generate()` and passed into each `generate_call()`.
 - The key is a tuple of four slots: the state, a text value, the options as a tuple, and the parameter type. Each state fills only the slots its branch in `next_state()` reads, and leaves the others as `None`.
 - The cache's type is named `CACHE_TYPE` in `decoder.py`, and `generator.py` uses the same name.
-- `F_NAME` and `P_NAME` use the text typed since the last quote and the options. `F_PARAM` uses the text after the function name, found by `find_after_name()`. `F_START` uses the full text generated so far, so identical text gives the same key in every prompt. `P_COLON` uses the parameter type. Other states use only the state.
+- `F_START` uses the full text generated so far, so identical text gives the same key in every prompt.
+- `F_NAME` and `P_NAME` use the text typed since the last quote and the options. `F_PARAM` uses the text after the function name, found by `find_after_name()`, and the options.
+- `P_COLON` uses the parameter type. `IN_BOOL` uses the letters typed after the colon, with the spaces removed.
+- `IN_STRING`, `P_NEXT`, `P_OPEN`, `P_AFTER_VALUE`, `NUM_INT`, and `NUM_DECIMAL` use the remaining parameter names. A token can run into a parameter name, and `,` or `}` depends on whether names are left.
+- Other states use only the state.
 - On a hit, the stored set is returned. On a miss, `allowed_tokens()` computes the set, which is stored and returned.
 
 ### Escapes and Strings
@@ -307,6 +335,10 @@ Used Pydantic models to validate input JSON files at load time. This catches mal
 
 The constrained decoding is a state machine. `decoder.py` contains a `State` enum (including the outer `F_START`, `F_NAME`, and `F_PARAM` states), a transition table, and `next_state()`, which covers the outer object, function name, parameter names, colon, string, and number states. `walk_token()` runs one candidate token through `next_state()`, and `allowed_tokens()` collects the IDs of the vocabulary tokens that pass. `generator.py` has `find_function()`, which looks up the chosen function, `capture_function_name()`, which reads the function name from the generated text, and `pick_token()`, which masks the logits with `mask_logits()`, picks the highest one, and returns its ID and text. `build_functions_text()`, `build_prompt()`, `invert_vocab()`, and `write_result()` handle the prompt and the output file. `generate_call()` runs the token loop for one prompt with an explicit state variable, passing the chosen function name to `get_allowed_tokens()` and `walk_token()`, and returns the parsed JSON. If exactly one token is valid, `generate_call()` skips the model for that step (see Forced Steps). `generate()` loads the files, builds the vocabulary once, calls `generate_call()` for each prompt, and writes the results. It takes an optional `on_result` callback, which it calls with the prompt's position, the total count, and the result after each successful prompt, and it returns the list of results. `cli.py` uses the callback to print each result. `walk_token()` returns the state after the token and the state before its last character. `generate_call()` uses only the first value. `walk_token()` also rejects a token in which the closing quote of a parameter name is followed by more characters.
 
+### Parameter Rules
+
+Each parameter name can be used once per call. The name is taken out of `options` when its closing quote is done, so the model can't repeat it. Commas and closing braces are checked against the names that are left: a `,` needs at least one name left, and a `}` needs none. Without these rules, the model could keep adding parameters until it hit the token limit, or close the object before all the required arguments were written.
+
 ### Error Handling
 
 Each prompt is handled on its own. If `generate_call()` raises a `ValueError` (no valid token, no matching function or parameter, or the JSON is not finished after `MAX_TOKENS`), `generate()` prints the prompt and the reason, then moves on. `generate()` also catches `KeyError`, so an unexpected missing key fails only its own prompt. The output can therefore have fewer entries than the input.
@@ -315,8 +347,9 @@ Each prompt is handled on its own. If `generate_call()` raises a `ValueError` (n
 
 ## Known Limitations
 
-- Function selection and argument extraction were checked only on the 11 prompts in `data/input/function_calling_tests.json`. [TODO: rerun on all 11 prompts and record the result]. Other prompts are untested, and the final choice is the model's.
-- Only `number` and `string` parameter types are supported. Other types (for example `boolean`) stop generation with an error.
+- Function selection and argument extraction were checked on the 11 prompts in `data/input/function_calling_tests.json`. The output matches the earlier hand-checked run. Other prompts are untested, and the final choice is the model's.
+- Only `number`, `string`, and `boolean` parameter types are supported. Other types stop generation with an error.
+- `boolean` was tested with a small temporary functions file and two prompts, not in the main test file.
 - Functions with no parameters are not supported.
 - String values cannot contain `"`, `\`, `{`, or `}`, and characters outside ASCII are not in the vocabulary used for string values.
 - Escape sequences are not supported. Backslashes are removed from string content.
@@ -325,12 +358,16 @@ Each prompt is handled on its own. If `generate_call()` raises a `ValueError` (n
 - Any exception raised while loading the model or the vocabulary is caught in `generate()` and reported as a `ValueError`.
 - A top-level JSON value that is not an array in the input files is rejected with a clear `ValueError`.
 
+### Number Format
+
+Numbers are written the way the model produced them. If the model picks `2`, the output has `2`, and if it picks `2.0`, the output has `2.0`. I didn't convert everything to floats, because a float can't hold every big integer exactly, so something like `12345678901234567890` would get rounded or written in scientific notation. Both `2` and `2.0` are valid JSON numbers and match the `number` type in `functions_definition.json`. The subject's example shows `2.0`, but that's an example, not a required format.
+
 ## Performance Analysis
 
-[TODO: Add performance metrics after completing the implementation]
+The timing below was measured before the parameter-name and cache changes. A new timing still needs to be recorded.
 
 ### Accuracy
-All 11 prompts in `data/input/function_calling_tests.json` produce a function name and parameters from the schema, and by inspection the chosen functions match the prompts. [TODO: score the results against the expected functions and parameters]. This is a small test set, so it doesn't show accuracy on other prompts.
+All 11 prompts in `data/input/function_calling_tests.json` produce a function name and parameters from the schema, and by inspection the chosen functions match the prompts. There is no expected-output file to score against, so the 11 outputs were compared with the earlier run, and they matched exactly. This is a small test set, so it doesn't show accuracy on other prompts.
 
 ### Speed
 Measured with `time make run` on a GTX 1650, including model loading. The latest run, with the forced-step skip, took 4:14.38 for the 11 prompts, under the subject's 5-minute target. Earlier versions took 5:13 to 6:02. Those earlier runs generated 319 tokens at about 0.9 to 1.3 seconds per token. `nvidia-smi` showed the GPU at 99% utilization, so the forward pass over the full prompt is the main cost. [TODO: repeat the timing over more runs, and count the forced steps in a full run]
@@ -364,11 +401,24 @@ All 11 outputs were checked by hand against the function schema (function names 
 
 **Solution**: Build the allowed token list from the vocabulary, keeping every token whose text uses only allowed characters.
 
+### Boolean Values
+
+**Problem**: `true` and `false` have no quotes, so the closing-quote rule used for strings doesn't work, and the decoder has to check the word letter by letter.
+
+**Solution**: After the colon, the decoder compares the letters typed so far with `true` and `false`, ignoring the spaces. When the full word is typed, the value is done, and `,` or `}` can follow.
+
+### Repeated Parameter Names
+
+**Problem**: In a boolean test, the model kept writing `"on": true, "on": false, ...` because nothing stopped it from reusing a name. The object never closed, and the prompt failed at the token limit. A full run also dropped `regex` and `replacement` from the regex prompts, because a set saved for an earlier prompt was reused.
+
+**Solution**: A name is removed from `options` once its closing quote is done. `,` and `}` are checked against the names that are left, and the states that can reach a name keep those names in their cache key.
+
 ## Testing Strategy
 
 - Helper checks: `build_functions_text()`, `build_prompt()`, `invert_vocab()`, `mask_logits()`, `find_function()`, `capture_function_name()`, and `write_result()` were checked by hand against the real input files. These are not yet written as unit tests. [TODO: add unit tests]
-- Full run: the 11-prompt test file was re-run after the prompt changes, and the output is identical to the earlier run in `data/output/function_calling_results_before.json`. The run after the forced-step skip was also compared with `diff` and was identical. The vowel prompt uses the regex `([aeiouAEIOU])`.
-- Validation of output JSON structure using Python's json module.
+- Full run: the 11-prompt test file was re-run after the prompt changes, and the output is identical to the earlier run in `data/output/function_calling_results_before.json`. The run after the forced-step skip was also compared with `diff` and was identical. The run after the parameter-name and cache changes was compared the same way, and it was identical again. The vowel prompt uses the regex `([aeiouAEIOU])`.
+- Boolean: a temporary functions file with one `boolean` parameter, and the prompts "Turn the light on" and "Turn the light off". Both came out as JSON booleans (`true` and `false`).
+- Validation of output JSON structure using Python's json module. [TODO: write the validation script]
 - Edge case testing (TO-DO)
 
 ## Example Usage
