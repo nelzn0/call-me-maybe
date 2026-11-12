@@ -4,13 +4,12 @@ import numpy as np
 from call_me_maybe.models import FunctionDefinition, TestPrompt
 from pydantic import BaseModel, ValidationError
 from llm_sdk import Small_LLM_Model
-import argparse
 import os
 from typing import Any, TypeVar
 from collections.abc import Callable
 from call_me_maybe.decoder import (
-    State, walk_token, extract_value_after_pattern,
-    is_json_complete, allow_char_temp,
+    State, walk_token,
+    extract_value_after_pattern, vocab_chars,
     get_allowed_tokens, CACHE_TYPE, text_after_last_quote
 )
 
@@ -164,16 +163,14 @@ def build_prompt(functions_text: str, user_prompt: str) -> str:
         The full prompt we send to the model
     """
 
-    prompt = f"""Available functions:
-
-{functions_text}
-
-User question: {user_prompt}
-
-Respond ONLY with a JSON object in this format:
-{{"name": "function_name", "parameters": {{...}}}}
-
-Response: """
+    prompt = f"""<|im_start|>system
+Respond ONLY with a JSON object
+Available functions:
+{functions_text}<|im_end|>
+<|im_start|>user
+{user_prompt}<|im_end|>
+<|im_start|>assistant
+{{"name": "function_name", "parameters": """
 
     return prompt
 
@@ -346,11 +343,10 @@ def generate_call(
                 logits, valid_tokens, vocab_invert
             )
 
-        walk_result = walk_token(
+        new_state = walk_token(
             state, chosen_text, generated_text, options, param_type, func_name
         )
-        if walk_result is not None:
-            new_state, _ = walk_result
+        if new_state is not None:
             # the function name is done, so look up its definition
             # and its parameters
             if state == State.F_NAME and new_state == State.F_PARAM:
@@ -385,8 +381,7 @@ def generate_call(
 
         generated_text = llm_model.decode(output_ids)
 
-        # stop once the braces are balanced
-        if is_json_complete(generated_text):
+        if state == State.DONE:
             parsed_result: dict[str, Any] = json.loads(generated_text)
             return parsed_result
 
@@ -394,16 +389,20 @@ def generate_call(
 
 
 def generate(
-    args: argparse.Namespace,
+    func_defs: list[FunctionDefinition],
+    prompts: list[TestPrompt],
+    output_path: str,
     on_result: Callable[[int, int, dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
-    """Generates a function call for each prompt and writes them to a file.
+    """Makes a function call for each prompt and saves them to a file.
 
-    Loads the functions and prompts, builds the vocabulary once, then runs
-    generate_call for each prompt. A prompt that fails is printed and skipped.
+    Builds the vocabulary once, then runs generate_call for each prompt.
+    If a prompt fails, it gets printed and skipped.
 
     Args:
-        args: The parsed command-line arguments (file paths)
+        func_defs: The functions the model can pick from
+        prompts: The prompts to run
+        output_path: Where to save the results
         on_result: Optional function called after each successful prompt
             with its position, the total number of prompts, and the result,
             for the CLI
@@ -411,16 +410,11 @@ def generate(
     Returns:
         The results that were written to the output file
     """
-
-    func_defs = load_json_data(args.functions_definition, FunctionDefinition)
-
-    inputs = load_json_data(args.input, TestPrompt)
-
     try:
         llm_model = Small_LLM_Model()
 
         # builds the vocab list once, before the prompt loop
-        vocab = get_vocabulary(allow_char_temp, llm_model)
+        vocab = get_vocabulary(vocab_chars, llm_model)
     except Exception as e:
         raise ValueError(f"Could not load the model: {e}")
 
@@ -431,9 +425,9 @@ def generate(
     functions = build_functions_text(func_defs)
 
     final_result = []
-    total = len(inputs)
+    total = len(prompts)
 
-    for index, current_input in enumerate(inputs, start=1):
+    for index, current_input in enumerate(prompts, start=1):
         # one bad prompt shouldn't stop the rest
         try:
             prompt = build_prompt(functions, current_input.prompt)
@@ -449,9 +443,13 @@ def generate(
             if on_result is not None:
                 print("")
                 on_result(index, total, entry)
-        except (ValueError, KeyError) as e:
-            print(f"Prompt: '{current_input.prompt}' - Failed because {e}",
-                  file=sys.stderr)
+        except Exception as e:
+            print(
+                f"Prompt: '{current_input.prompt}' - Failed because "
+                f"{type(e).__name__}: {e}",
+                file=sys.stderr
+            )
+        write_result(output_path, final_result)
 
-    write_result(args.output, final_result)
+    write_result(output_path, final_result)
     return final_result

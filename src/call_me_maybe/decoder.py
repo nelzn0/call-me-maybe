@@ -48,12 +48,10 @@ TRANSITIONS: dict[State, dict[str, State]] = {
 
 escape_chars = '"\\/bfnrt'
 
-allow_char_temp = (
+vocab_chars = (
     string.ascii_letters + string.punctuation + ' ' + string.digits
 ).replace('\\', '')
-allowed_in_string_rq = allow_char_temp.replace('"', '')
-allowed_in_string_rb = allowed_in_string_rq.replace('{', '')
-allowed_in_string = allowed_in_string_rb.replace('}', '')
+allowed_in_string = vocab_chars.replace('"', '')
 
 
 CACHE_TYPE = dict[tuple[State, str | None,
@@ -277,7 +275,7 @@ def walk_token(
     options: list[str],
     param_type: str | None,
     func_name: str | None = None,
-) -> tuple[State, State] | None:
+) -> State | None:
     """Runs a whole token through next_state, one character at a time.
 
     Stops as soon as one character is rejected. A colon has to be the
@@ -293,11 +291,9 @@ def walk_token(
         func_name: The chosen function's name, if we have one
 
     Returns:
-        A tuple of (the state after the token, the state before its
-        last character), or None if any character is rejected
+        The state after the token,
+        or None if any character is rejected
     """
-
-    prev_state = state
 
     for i, c in enumerate(token_text):
         prev_state = state
@@ -319,7 +315,7 @@ def walk_token(
 
         generated_so_far += c
 
-    return state, prev_state
+    return state
 
 
 def allowed_tokens(
@@ -465,34 +461,3 @@ def extract_value_after_pattern(
         return extracted
 
     return None
-
-
-def is_json_complete(text: str) -> bool:
-    """Checks if the generated JSON text is complete by counting braces.
-
-    Keeps track of opening and closing braces to see if we've closed all
-    the JSON objects we opened. Returns True only if we opened at least one
-    brace and closed all of them.
-
-    Args:
-        text: The JSON text generated so far
-
-    Returns:
-        True if the JSON is complete (all braces are balanced), False otherwise
-    """
-    depth = 0
-    opened = False
-
-    for c in text:
-        if '{' == c:
-            depth += 1
-            opened = True
-
-        elif '}' == c:
-            depth -= 1
-
-    # if it was opened, check depth, otherwise always false
-    if opened:
-        return depth == 0
-    else:
-        return False

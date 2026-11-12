@@ -100,7 +100,7 @@ def main() -> None:
 
         print("")
 
-        results = generate(args, show_result)
+        results = generate(functions, prompts, args.output, show_result)
 
         print("")
 
@@ -120,3 +120,7 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nInterrupted.", file=sys.stderr)
         sys.exit(130)
+
+    except Exception as e:
+        print(f"Error: {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(1)
