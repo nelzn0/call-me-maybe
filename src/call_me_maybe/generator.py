@@ -2,6 +2,7 @@ import json
 import sys
 import numpy as np
 from call_me_maybe.models import FunctionDefinition, TestPrompt
+from call_me_maybe.colors import colorize, RED
 from pydantic import BaseModel, ValidationError
 from llm_sdk import Small_LLM_Model
 import os
@@ -130,7 +131,7 @@ def find_function(
 def build_functions_text(func_defs: list[FunctionDefinition]) -> str:
     """Turns the function definitions into text for the prompt.
 
-    Each function gets its name, description, and parameter types, so the
+    Each function gets its name, description, and parameters, so the
     model knows what it can pick from.
 
     Args:
@@ -443,9 +444,13 @@ def generate(
                 print("")
                 on_result(index, total, entry)
         except Exception as e:
+            print("")
             print(
-                f"Prompt: '{current_input.prompt}' - Failed because "
-                f"{type(e).__name__}: {e}",
+                colorize(
+                    f"[{index}/{total}] '{current_input.prompt}' - "
+                    f"Failed because {type(e).__name__}: {e}",
+                    RED
+                ),
                 file=sys.stderr
             )
         write_result(output_path, final_result)

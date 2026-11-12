@@ -1,11 +1,12 @@
 import argparse
 import json
-import os
 import sys
 from typing import Any
 
 from call_me_maybe.generator import generate, load_json_data
 from call_me_maybe.models import FunctionDefinition, TestPrompt
+from call_me_maybe.colors import colorize, RED, GREEN, YELLOW, BLUE, CYAN
+
 
 BANNER = """ ██████╗ █████╗ ██╗     ██╗         ███╗   ███╗███████╗
 ██╔════╝██╔══██╗██║     ██║         ████╗ ████║██╔════╝
@@ -22,14 +23,6 @@ BANNER = """ ██████╗ █████╗ ██╗     ██╗   
 ╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚═════╝ ╚══════╝"""
 
 
-def colorize(text: str, code: str) -> str:
-    """Adds ANSI color codes, but only when printing to a terminal."""
-
-    if sys.stdout.isatty() and "NO_COLOR" not in os.environ:
-        return f"\033[{code}m{text}\033[0m"
-    return text
-
-
 def show_result(index: int, total: int, entry: dict[str, Any]) -> None:
     """Prints one finished prompt and its JSON result.
 
@@ -40,7 +33,7 @@ def show_result(index: int, total: int, entry: dict[str, Any]) -> None:
     """
 
     result = {k: v for k, v in entry.items() if k != "prompt"}
-    print(colorize(f"[{index}/{total}] {entry['prompt']}", "36"))
+    print(colorize(f"[{index}/{total}] {entry['prompt']}", CYAN))
     print(f"  {json.dumps(result)}")
 
 
@@ -77,12 +70,12 @@ def main() -> None:
 
     print("")
 
-    print(colorize(BANNER, "34"))
+    print(colorize(BANNER, BLUE))
 
     print("")
 
     try:
-        print(colorize("Getting functions...", "33"))
+        print(colorize("Getting functions...", CYAN))
         functions = load_json_data(
             args.functions_definition, FunctionDefinition
         )
@@ -90,28 +83,34 @@ def main() -> None:
 
         print("")
 
-        print(colorize("Getting inputs...", "33"))
+        print(colorize("Getting inputs...", CYAN))
         prompts = load_json_data(args.input, TestPrompt)
         print(f"  {len(prompts)} prompts found")
 
         print("")
 
-        print(colorize("Start generation", "33"))
+        print(colorize("Start generation", YELLOW))
 
         print("")
 
         results = generate(functions, prompts, args.output, show_result)
 
+        failed = len(prompts) - len(results)
+
         print("")
 
         print(colorize(
             f"\nGeneration complete! {len(results)}/{len(prompts)} "
-            "prompts succeeded.", "32"
+            "prompts succeeded.", RED if failed else GREEN
         ))
 
         print("")
 
         print(f"Output written to: {args.output}")
+
+        if failed:
+            print(f"Error: {failed} prompt(s) have failed.", file=sys.stderr)
+            sys.exit(1)
 
     except (FileNotFoundError, ValueError, OSError) as e:
         print(f"Error: {e}", file=sys.stderr)
