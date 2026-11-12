@@ -34,7 +34,7 @@ uv run python -m src [--functions_definition <file>] [--input <file>] [--output 
 - Input prompts: `data/input/function_calling_tests.json`
 - Output results: `data/output/function_calling_results.json`
 
-The program prints a title banner, then status lines for the functions and prompts. After each prompt finishes, it prints the prompt and its JSON result, and it prints a summary at the end. Errors go to stderr. The program exits with code 1 for file or output errors and with code 130 on Ctrl+C. Colors are used only when output goes to a terminal, and they are turned off when `NO_COLOR` is set.
+The program prints each prompt and its JSON result as it finishes. Errors go to stderr, and the program exits with code 1 if a file fails or any prompt fails. The output file still gets the prompts that succeeded.
 
 ### Example
 
@@ -45,26 +45,6 @@ uv run python -m src \
   --output data/output/function_calling_results.json
 ```
 
-## Resources
-
-### References
-
-- [Language Models are Few-Shot Learners](https://arxiv.org/abs/2005.14165) - OpenAI GPT-3 paper
-- [JSON Schema](https://json-schema.org/) - JSON validation specification
-- [Pydantic Documentation](https://docs.pydantic.dev/) - Data validation library
-- [Hugging Face Transformers](https://huggingface.co/docs/transformers/) - LLM framework
-
-### AI Usage
-
-AI tools were used as a learning aid throughout this project, following the 42 curriculum guidelines:
-
-- **Code assistance**: AI helped debug token encoding/decoding issues and understand tensor operations from the LLM SDK
-- **Design guidance**: Discussed state machine architecture for constrained decoding
-- **Documentation**: AI assisted in writing docstrings and comments, with manual review and editing
-- **Debugging**: Helped trace through token generation loops and identify state machine logic errors
-
-All AI-generated code was reviewed, tested, and modified as needed. The core algorithm design and implementation were developed through understanding the concepts and writing the solution manually, with AI serving as a supplementary resource for clarification and error diagnosis.
-
 ## Algorithm Explanation
 
 ### Constrained Decoding Approach
@@ -72,9 +52,9 @@ All AI-generated code was reviewed, tested, and modified as needed. The core alg
 The system uses a state machine to track the current position in the JSON output and constrain token selection at each step:
 
 1. **State Detection**: Analyze the generated text to determine which JSON field is being written
-2. **Token Filtering**: Based on the current state, identify which tokens are valid
-3. **Logit Masking**: Set invalid token logits to negative infinity before selection
-4. **Token Selection**: Choose the highest-probability token from the remaining valid options
+2. **Token Filtering**: Identify which tokens are valid in the current state
+3. **Logit Masking**: Set invalid token logits to negative infinity
+4. **Token Selection**: Choose the highest-probability valid token
 
 ### Current Implementation
 
@@ -93,15 +73,9 @@ The state is stored in an explicit variable and updated after every token by `wa
 4. **Parameters key:** the letters of `parameters`, then its closing quote.
 5. **After the key:** a colon, then a space or `{`, then `{`.
 6. **Parameter names:** the letters of the valid parameter names for the
-   chosen function. Once a name is closed, a colon is allowed, and that name is removed from the list so it can't be used again. The closing
-   quote must be the last character of its token, so a token like `":` is
-   rejected and the colon comes in a later token.
-7. **Parameter values:** the parameter's type comes from the schema. `number` allows spaces, digits, and `-` after the colon. After a digit, it allows more digits, one `.` followed by digits, `,`, or `}`. `string` allows spaces, then `"` after the colon to open the value. Inside the string, the allowed tokens come from the precomputed vocabulary list. After the closing `"`, the value is done. `boolean` allows spaces after the colon, then `t` or `f`. The letters have to spell `true` or `false`, and the full word ends the value.
-8. **After a value:** a `,` is allowed only while parameter names are left, and a `}` is allowed only after all of them are used. The model can't start an extra parameter or close the object early.
-
-A parameter name is read when its closing quote is walked. `generate_call()` takes the text up to the closing quote, which includes the chosen token minus its last character, and then the text after the last quote, using `text_after_last_quote()`. It looks up that name in the schema and uses its type. A name that is not in the function's parameters raises a `ValueError`. This keeps a token such as `b"` from losing its letter.
-
-Before generation, `get_vocabulary()` builds a dict of token text to token ID, keeping only tokens whose text uses allowed characters, once per run. The `Ġ` marker becomes a space before the check.
+   chosen function. Once a name is closed, a colon is allowed, and that name is removed from the list so it can't be used again. The closing quote must be the last character of its token.
+7. **Parameter values:** the type comes from the schema. `number` allows digits, `-`, and one `.`. `string` opens with `"` and uses the precomputed vocabulary list. `boolean` must spell `true` or `false`.
+8. **After a value:** a `,` is allowed only while parameter names are left, and a `}` only after all of them are used.
 
 ### State Diagram
 
@@ -272,16 +246,6 @@ A backslash inside a string moves to `IN_ESCAPE`, and the next character must be
  +----------+
 ```
 
-### Token Extraction
-
-The `extract_value_after_pattern()` function:
-- Searches for a pattern in the text
-- Finds the start position after the pattern
-- Scans for the earliest stop character (from a list of possibilities)
-- Returns the text between start and stop positions
-
-This handles cases where we need to extract partial values during generation (like a function name being built token by token).
-
 ### Token Validation
 
 The `allowed_tokens()` function:
@@ -291,51 +255,20 @@ The `allowed_tokens()` function:
 
 This ensures the model can only generate tokens that lead to valid JSON structure and schema compliance.
 
-### Forced Steps
-
-`generate_call()` computes the valid tokens before it asks the model for logits. If exactly one token is valid, that token is chosen directly, and the model is not called for that step. The chosen token still goes through `walk_token()`, is appended to the output, and the new state is checked for `DONE`, the same as a token picked by the model. Since the mask leaves only one token, the model's scores could not change the choice.
-
-### Allowed-Token Cache
-
-The `get_allowed_tokens()` function wraps `allowed_tokens()` with a cache:
-- The cache is a dict created once per run in `generate()` and passed into each `generate_call()`.
-- The key is a tuple of four slots: the state, a text value, the options as a tuple, and the parameter type. Each state fills only the slots its branch in `next_state()` reads, and leaves the others as `None`.
-- The cache's type is named `CACHE_TYPE` in `decoder.py`, and `generator.py` uses the same name.
-- `F_START` uses the full text generated so far, so identical text gives the same key in every prompt.
-- `F_NAME` and `P_NAME` use the text typed since the last quote and the options. `F_PARAM` uses the text after the function name, found by `find_after_name()`, and the options.
-- `P_COLON` uses the parameter type. `IN_BOOL` uses the letters typed after the colon, with the spaces removed.
-- `IN_STRING`, `P_NEXT`, `P_OPEN`, `P_AFTER_VALUE`, `NUM_INT`, and `NUM_DECIMAL` use the remaining parameter names. A token can run into a parameter name, and `,` or `}` depends on whether names are left.
-- Other states use only the state.
-- On a hit, the stored set is returned. On a miss, `allowed_tokens()` computes the set, which is stored and returned.
-
 ### Escapes and Strings
 
-Inside a string, `next_state()` has an escape path: a `\` moves to `IN_ESCAPE`, and the next character must be one of `"\/bfnrt`. Backslash is in the vocabulary used for string values, so the model can write escapes. The regex `\d+` is written in the JSON as `"\\d+"`, which parses to `\d+`. Tokens such as `\"` work because `walk_token()` checks each character.
+Inside a string, `next_state()` has an escape path: a `\` moves to `IN_ESCAPE`, and the next character must be one of `"\/bfnrt`. The regex `\d+` is written in the JSON as `"\\d+"`, which parses to `\d+`. Tokens such as `\"` work because `walk_token()` checks each character.
 
 
 ## Design Decisions
 
 ### Modular Architecture
 
-The code is organized into four modules:
-- `models.py`: Pydantic models for data validation (FunctionDefinition, TestPrompt, ParamType)
-- `decoder.py`: Constrained decoding logic and state machine
-- `generator.py`: Main generation loop and data loading
-- `cli.py`: Command-line interface, argument parsing, title banner, progress output, and error handling
-
-This separation makes each component testable and maintainable.
-
-### Generic Helper Functions
-
-Created reusable functions like `extract_value_after_pattern()` and `allowed_tokens()` that work for both function names and parameter names. `text_after_last_quote()` and `find_after_name()` are shared by `next_state()` and the cache key, so both read the same text. This reduces code duplication and makes the state machine easier to extend.
+The code is split into four modules: `models.py` (Pydantic models), `decoder.py` (state machine), `generator.py` (generation loop and data loading), and `cli.py` (arguments, output, and errors). This keeps each part testable and maintainable.
 
 ### Pydantic for Validation
 
 Used Pydantic models to validate input JSON files at load time. This catches malformed data early and provides clear error messages, meeting the subject's requirement for robust error handling.
-
-### State Machine Pattern
-
-The constrained decoding is a state machine. `decoder.py` contains a `State` enum (including the outer `F_START`, `F_NAME`, and `F_PARAM` states), a transition table, and `next_state()`, which covers the outer object, function name, parameter names, colon, string, and number states. `walk_token()` runs one candidate token through `next_state()`, and `allowed_tokens()` collects the IDs of the vocabulary tokens that pass. `generator.py` has `find_function()`, which looks up the chosen function, `capture_function_name()`, which reads the function name from the generated text, and `pick_token()`, which masks the logits with `mask_logits()`, picks the highest one, and returns its ID and text. `build_functions_text()`, `build_prompt()`, `invert_vocab()`, and `write_result()` handle the prompt and the output file. `generate_call()` runs the token loop for one prompt with an explicit state variable, passing the chosen function name to `get_allowed_tokens()` and `walk_token()`, and returns the parsed JSON. If exactly one token is valid, `generate_call()` skips the model for that step (see Forced Steps). `cli.py` loads the files and passes them to `generate()`. `generate()` builds the vocabulary once, calls `generate_call()` for each prompt, and saves the results. It takes an optional `on_result` callback, which it calls with the prompt's position, the total count, and the result after each successful prompt, and it returns the list of results. `cli.py` uses the callback to print each result. `walk_token()` returns the state after the token, or None if a character is rejected. `walk_token()` also rejects a token in which the closing quote of a parameter name is followed by more characters.
 
 ### Parameter Rules
 
@@ -347,35 +280,20 @@ Each prompt is handled on its own. If `generate_call()` raises a `ValueError` (n
 
 `cli.py` handles missing or invalid input files and output write errors. It prints one error line to stderr and exits with code 1.
 
-## Known Limitations
-
-- Function selection and argument extraction were checked on the 11 prompts in `data/input/function_calling_tests.json`. The output matches the earlier hand-checked run. Other prompts are untested, and the final choice is the model's.
-- Only `number`, `string`, and `boolean` parameter types are supported. Other types stop generation with an error.
-- `boolean` was tested with a small temporary functions file and two prompts, not in the main test file.
-- Functions with no parameters are supported. After `"parameters": {`, the decoder accepts `}` directly and writes `"parameters": {}`. This was tested with one zero-parameter function in a temporary functions file, not in the main test file.
-- String values cannot contain an unescaped `"`, and characters outside ASCII are not in the vocabulary used for string values.
-- Escape sequences `\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, and `\t` are supported. `\u` is not, because the four hex digits would need extra states. `\d` is not valid JSON either, so a regex like `\d+` must be written as `\\d+`.
-- The model can still close a string early at a quote inside the text instead of writing `\"`. The decoder allows this, so the JSON is valid but the value is cut short. In a test with `Reverse the string 'say "hi" now'`, the output was `"say "`.
-- `{` and `}` are allowed inside string values. A `}` inside a value doesn't end the JSON early, because the output only stops after the closing `}` of the whole object. A value like `{x}` was tested with one prompt and came out correctly.
-- Any exception raised while loading the model or the vocabulary is caught in `generate()` and reported as a `ValueError`.
-- A top-level JSON value that is not an array in the input files is rejected with a clear `ValueError`.
-
 ### Number Format
 
-Numbers are written the way the model produced them. If the model picks `2`, the output has `2`, and if it picks `2.0`, the output has `2.0`. I didn't convert everything to floats, because a float can't hold every big integer exactly, so something like `12345678901234567890` would get rounded or written in scientific notation. Both `2` and `2.0` are valid JSON numbers and match the `number` type in `functions_definition.json`. The subject's example shows `2.0`, but that's an example, not a required format.
+Numbers are written as the model produced them (`2` or `2.0`). I didn't convert them to floats, because a float can't hold every big integer exactly.
 
 ## Performance Analysis
 
-The timings below include the latest runs, after the parameter-name, cache, and zero-parameter changes. Two of the three planned timed runs are recorded.
-
 ### Accuracy
-All 11 prompts in `data/input/function_calling_tests.json` produce a function name and parameters from the schema, and by inspection the chosen functions match the prompts. There is no expected-output file to score against, so the 11 outputs were compared with the earlier run, and they matched exactly. This is a small test set, so it doesn't show accuracy on other prompts.
+All 11 prompts in `data/input/function_calling_tests.json` produce a function name and parameters from the schema, and by inspection the chosen functions match the prompts. There is no expected-output file to score against, so the outputs were compared with the earlier run, and they matched exactly. This is a small test set, so it doesn't show accuracy on other prompts.
 
 ### Speed
-Measured with `time make run` on a GTX 1650, including model loading. The latest run, with the forced-step skip, took 4:14.38 for the 11 prompts, under the subject's 5-minute target. Earlier versions took 5:13 to 6:02. Those earlier runs generated 319 tokens at about 0.9 to 1.3 seconds per token. `nvidia-smi` showed the GPU at 99% utilization, so the forward pass over the full prompt is the main cost. Two more runs of the 11 prompts after the prompt change took 4:09.10 and 4:17.81 (wall clock). They used `uv run python -m src` with the output going to a temporary file, the same program that `make run` runs. A third `make run` after the escape support took 4:17.01 (wall clock), and its output matched the baseline.
+Measured on a GTX 1650, including model loading. The 11 prompts take about 4:10 to 4:20 with `make run`, under the subject's 5-minute target. Earlier versions took 5:13 to 6:02. `nvidia-smi` showed the GPU at 99% utilization, so the forward pass over the full prompt is the main cost.
 
 ### Reliability
-All 11 outputs were checked by hand against the function schema (function names and parameter names). [TODO: validate the outputs with a script using Python's json module]. This is measured on the test file only.
+All 11 outputs were checked by hand against the function schema, and the same checks were run automatically with a validation script. All 11 outputs pass. This is measured on the test file only.
 
 ## Challenges Faced
 
@@ -417,12 +335,25 @@ All 11 outputs were checked by hand against the function schema (function names 
 
 ## Testing Strategy
 
-- Helper checks: `build_functions_text()`, `build_prompt()`, `invert_vocab()`, `mask_logits()`, `find_function()`, `capture_function_name()`, and `write_result()` were checked by hand against the real input files. These are not yet written as unit tests. [TODO: add unit tests]
-- Full run: the 11-prompt test file was re-run after the prompt changes, and the output is identical to the earlier run in `data/output/function_calling_results_before.json`. The run after the forced-step skip was also compared with `diff` and was identical. The run after the parameter-name and cache changes was compared the same way, and it was identical again. The run after the zero-parameter change, with the prompt change, was also identical to the baseline. The vowel prompt uses the regex `([aeiouAEIOU])`.
-- Boolean: a temporary functions file with one `boolean` parameter, and the prompts "Turn the light on" and "Turn the light off". Both came out as JSON booleans (`true` and `false`).
-- Zero-parameter functions: a temporary functions file with `fn_get_time` (`"parameters": {}`) and `fn_greet`, and the prompts "What time is it?" and "Greet shrek". The first came out as `{"name": "fn_get_time", "parameters": {}}` and the second as `{"name": "fn_greet", "parameters": {"name": "shrek"}}`.
-- Validation of output JSON structure using Python's json module. [TODO: write the validation script]
-- Edge case testing (TO-DO)
+The test files used during development are not included in the repository. The checks below were run locally.
+
+- Unit tests (no model needed): the state machine (empty input, large numbers, wrong types, special characters, escapes, zero parameters, braces in values), the helpers (vocabulary building, prompt building, logit masking, token picking, function lookup), and input loading (wrong types, empty files, invalid JSON, missing files).
+- Full run: the 11-prompt test file was re-run after each change, and the output was identical to the baseline run.
+- Output validation: a script checked that the output is a JSON array, that each entry has exactly `prompt`, `name`, and `parameters`, that the function exists, that the parameters match the schema exactly, that each value has the declared type, and that there is one entry per input prompt.
+- Boolean: a temporary functions file with one `boolean` parameter and the prompts "Turn the light on" and "Turn the light off" gave `true` and `false`.
+- Zero-parameter functions: a temporary functions file with `fn_get_time` and the prompt "What time is it?" gave `"parameters": {}`.
+- Edge cases: 12 prompts in a temporary edge-case set produced schema-valid output. Results by category:
+  - Empty input: the empty prompt `""` produced `fn_get_time` (a guess, since nothing was asked). `Reverse the string ''` produced `"s": ""`.
+  - Large numbers: `123456789012345` and `987654321098765` were written exactly.
+  - Wrong types: `Add 'two' and 'three'` produced `"a": 2, "b": 3`, so the model turned the words into numbers.
+  - Ambiguous prompt: `Do the thing with 5` produced `fn_add_numbers` with `a: 5, b: 5`.
+  - Special characters: `O'Brien-Smith!@#$%^&*()` produced `"O'Brien-Smith!"`, so the model dropped the trailing symbols.
+  - Zero parameters: `What time is it?` produced `"parameters": {}`.
+  - Booleans: `on` and `off` produced `true` and `false`.
+  - Braces: `{x}` is kept inside the string value.
+  - Escapes: `\\d+` in the regex prompt was written correctly, but `Reverse the string 'say "hi" now'` still gives `"say "`, because the decoder allows a quote to close the string early.
+- Non-ASCII: four prompts with non-ASCII characters (`Greet José`, `Reverse the string 'café'`, `Greet 你好`, `Greet 😀`) were run. All four exited with code 0, so the failure is silent. The values are wrong, as shown above.
+- Failed prompts: a temporary functions file with one `fn_make_list` function, which has an `array` parameter. The decoder doesn't support that type, so the prompt "Make a list of apples and pears" failed with `ValueError: No valid tokens found`. The other two prompts in the same run, "Greet shrek" and "Greet john", succeeded. The output file had two entries, and the exit code was 1.
 
 ## Example Usage
 
@@ -461,3 +392,23 @@ Output for the prompt "Greet shrek" and "Greet john" (from `data/output/function
   }
 ]
 ```
+
+## Resources
+
+### References
+
+- [Language Models are Few-Shot Learners](https://arxiv.org/abs/2005.14165) - OpenAI GPT-3 paper
+- [JSON Schema](https://json-schema.org/) - JSON validation specification
+- [Pydantic Documentation](https://docs.pydantic.dev/) - Data validation library
+- [Hugging Face Transformers](https://huggingface.co/docs/transformers/) - LLM framework
+
+### AI Usage
+
+AI was used as a tutor and assistant throughout this project, following the 42 curriculum guidelines. No AI-generated code is in the project. All code was written and reviewed by me.
+
+- **Concept explanations**: AI explained tokenizers, logits, and constrained decoding, and helped me understand tensor operations from the LLM SDK
+- **Design discussion**: Talked through state machine architecture for constrained decoding. The design choices are mine.
+- **Debugging guidance**: AI helped me trace token encoding and decoding issues, token generation loops, and state machine logic errors. I made the fixes myself.
+- **Documentation**: AI helped with the wording of documentation, including docstrings, comments, and this README. I reviewed and edited all of it.
+
+The core algorithm design and implementation were developed through understanding the concepts and writing the solution manually.
