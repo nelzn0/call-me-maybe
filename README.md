@@ -179,6 +179,8 @@ Each diagram shows one part of the state machine. `(stay)` means the state loops
      +-- number type --> Number value
 ```
 
+In `P_OPEN`, a `}` is allowed only when the function has no parameters, and it goes straight to `P_CLOSE`. A `"` is allowed only when there are parameters.
+
 **String value**:
 
 ```
@@ -202,7 +204,7 @@ Each diagram shows one part of the state machine. `(stay)` means the state loops
      | '}'   --> P_CLOSE
 ```
 
-A backslash inside a string would move to `IN_ESCAPE`, but it is not reachable yet because backslash is removed from the vocabulary.
+A backslash inside a string moves to `IN_ESCAPE`, and the next character must be one of `"\/bfnrt`.
 
 **Number value**:
 
@@ -308,7 +310,7 @@ The `get_allowed_tokens()` function wraps `allowed_tokens()` with a cache:
 
 ### Escapes and Strings
 
-Inside a string, `next_state()` has an escape path: a `\` moves to `IN_ESCAPE`, and the next character must be one of `"\/bfnrt`. Backslash is not in the vocabulary used for string values, so this path is not reachable yet.
+Inside a string, `next_state()` has an escape path: a `\` moves to `IN_ESCAPE`, and the next character must be one of `"\/bfnrt`. Backslash is in the vocabulary used for string values, so the model can write escapes. The regex `\d+` is written in the JSON as `"\\d+"`, which parses to `\d+`. Tokens such as `\"` work because `walk_token()` checks each character.
 
 
 ## Design Decisions
@@ -350,10 +352,10 @@ Each prompt is handled on its own. If `generate_call()` raises a `ValueError` (n
 - Function selection and argument extraction were checked on the 11 prompts in `data/input/function_calling_tests.json`. The output matches the earlier hand-checked run. Other prompts are untested, and the final choice is the model's.
 - Only `number`, `string`, and `boolean` parameter types are supported. Other types stop generation with an error.
 - `boolean` was tested with a small temporary functions file and two prompts, not in the main test file.
-- Functions with no parameters are not supported.
-- String values cannot contain `"` or `\`, and characters outside ASCII are not in the vocabulary used for string values.
-- Escape sequences are not supported. Backslashes are removed from string content.
-- The state machine in `decoder.py` plans to support escape sequences other than `\u`. `\u` is not accepted because `u` is not in the list of escape characters, and the test prompts do not need it.
+- Functions with no parameters are supported. After `"parameters": {`, the decoder accepts `}` directly and writes `"parameters": {}`. This was tested with one zero-parameter function in a temporary functions file, not in the main test file.
+- String values cannot contain an unescaped `"`, and characters outside ASCII are not in the vocabulary used for string values.
+- Escape sequences `\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, and `\t` are supported. `\u` is not, because the four hex digits would need extra states. `\d` is not valid JSON either, so a regex like `\d+` must be written as `\\d+`.
+- The model can still close a string early at a quote inside the text instead of writing `\"`. The decoder allows this, so the JSON is valid but the value is cut short. In a test with `Reverse the string 'say "hi" now'`, the output was `"say "`.
 - `{` and `}` are allowed inside string values. A `}` inside a value doesn't end the JSON early, because the output only stops after the closing `}` of the whole object. A value like `{x}` was tested with one prompt and came out correctly.
 - Any exception raised while loading the model or the vocabulary is caught in `generate()` and reported as a `ValueError`.
 - A top-level JSON value that is not an array in the input files is rejected with a clear `ValueError`.
@@ -364,13 +366,13 @@ Numbers are written the way the model produced them. If the model picks `2`, the
 
 ## Performance Analysis
 
-The timing below was measured before the parameter-name and cache changes. A new timing still needs to be recorded.
+The timings below include the latest runs, after the parameter-name, cache, and zero-parameter changes. Two of the three planned timed runs are recorded.
 
 ### Accuracy
 All 11 prompts in `data/input/function_calling_tests.json` produce a function name and parameters from the schema, and by inspection the chosen functions match the prompts. There is no expected-output file to score against, so the 11 outputs were compared with the earlier run, and they matched exactly. This is a small test set, so it doesn't show accuracy on other prompts.
 
 ### Speed
-Measured with `time make run` on a GTX 1650, including model loading. The latest run, with the forced-step skip, took 4:14.38 for the 11 prompts, under the subject's 5-minute target. Earlier versions took 5:13 to 6:02. Those earlier runs generated 319 tokens at about 0.9 to 1.3 seconds per token. `nvidia-smi` showed the GPU at 99% utilization, so the forward pass over the full prompt is the main cost. [TODO: repeat the timing over more runs, and count the forced steps in a full run]
+Measured with `time make run` on a GTX 1650, including model loading. The latest run, with the forced-step skip, took 4:14.38 for the 11 prompts, under the subject's 5-minute target. Earlier versions took 5:13 to 6:02. Those earlier runs generated 319 tokens at about 0.9 to 1.3 seconds per token. `nvidia-smi` showed the GPU at 99% utilization, so the forward pass over the full prompt is the main cost. Two more runs of the 11 prompts after the prompt change took 4:09.10 and 4:17.81 (wall clock). They used `uv run python -m src` with the output going to a temporary file, the same program that `make run` runs. A third `make run` after the escape support took 4:17.01 (wall clock), and its output matched the baseline.
 
 ### Reliability
 All 11 outputs were checked by hand against the function schema (function names and parameter names). [TODO: validate the outputs with a script using Python's json module]. This is measured on the test file only.
@@ -393,7 +395,7 @@ All 11 outputs were checked by hand against the function schema (function names 
 
 **Problem**: A `"` can open a value, close a value, or be part of the content of a value, and a backslash can turn a quote into content. Counting quotes alone gives the wrong answer when escaped quotes are present.
 
-**Solution**: Backslashes are currently removed from the vocabulary, so string values cannot contain `\`. `next_state()` has an escape path for `\`, but it is not reachable until backslash tokens are allowed. Escape sequences are not supported yet.
+**Solution**: Backslash is kept in the vocabulary, and `next_state()` has an escape path for `\`. Only `IN_STRING` accepts a backslash, so it can't appear in other states. Each character of a token goes through `next_state()`, so `\"` and `\\` work inside a single token.
 
 ### Multi-Character Tokens
 
@@ -416,8 +418,9 @@ All 11 outputs were checked by hand against the function schema (function names 
 ## Testing Strategy
 
 - Helper checks: `build_functions_text()`, `build_prompt()`, `invert_vocab()`, `mask_logits()`, `find_function()`, `capture_function_name()`, and `write_result()` were checked by hand against the real input files. These are not yet written as unit tests. [TODO: add unit tests]
-- Full run: the 11-prompt test file was re-run after the prompt changes, and the output is identical to the earlier run in `data/output/function_calling_results_before.json`. The run after the forced-step skip was also compared with `diff` and was identical. The run after the parameter-name and cache changes was compared the same way, and it was identical again. The vowel prompt uses the regex `([aeiouAEIOU])`.
+- Full run: the 11-prompt test file was re-run after the prompt changes, and the output is identical to the earlier run in `data/output/function_calling_results_before.json`. The run after the forced-step skip was also compared with `diff` and was identical. The run after the parameter-name and cache changes was compared the same way, and it was identical again. The run after the zero-parameter change, with the prompt change, was also identical to the baseline. The vowel prompt uses the regex `([aeiouAEIOU])`.
 - Boolean: a temporary functions file with one `boolean` parameter, and the prompts "Turn the light on" and "Turn the light off". Both came out as JSON booleans (`true` and `false`).
+- Zero-parameter functions: a temporary functions file with `fn_get_time` (`"parameters": {}`) and `fn_greet`, and the prompts "What time is it?" and "Greet shrek". The first came out as `{"name": "fn_get_time", "parameters": {}}` and the second as `{"name": "fn_greet", "parameters": {"name": "shrek"}}`.
 - Validation of output JSON structure using Python's json module. [TODO: write the validation script]
 - Edge case testing (TO-DO)
 

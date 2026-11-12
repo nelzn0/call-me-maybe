@@ -30,7 +30,6 @@ class State(Enum):
 
 # fixed characters only. digits and names are checked in next_state
 TRANSITIONS: dict[State, dict[str, State]] = {
-    State.P_OPEN: {'"': State.P_NAME},
     State.P_NEXT: {' ': State.P_NEXT, '"': State.P_NAME},
     # , starts the next parameter, } closes the params
     State.P_AFTER_VALUE: {',': State.P_NEXT, '}': State.P_CLOSE},
@@ -48,12 +47,10 @@ TRANSITIONS: dict[State, dict[str, State]] = {
 
 escape_chars = '"\\/bfnrt'
 
-# letters, punctuation, space and digits. backslash is removed since escapes
-# are not supported. the quote is removed from allowed_in_string, since it
+# letters, punctuation, space and digits.
+# the quote is removed from allowed_in_string, since it
 # would end the string value early
-vocab_chars = (
-    string.ascii_letters + string.punctuation + ' ' + string.digits
-).replace('\\', '')
+vocab_chars = string.ascii_letters + string.punctuation + ' ' + string.digits
 allowed_in_string = vocab_chars.replace('"', '')
 
 
@@ -148,6 +145,19 @@ def next_state(
     ):
         return None
 
+    # zero parameters check
+    if (
+        not options and char == '}'
+        and state == State.P_OPEN
+    ):
+        return State.P_CLOSE
+
+    if (
+        options and char == '"'
+        and state == State.P_OPEN
+    ):
+        return State.P_NAME
+
     # get current state
     if char in TRANSITIONS.get(state, {}):
         return TRANSITIONS[state][char]
@@ -209,7 +219,6 @@ def next_state(
     if state == State.P_COLON and char == ':' and param_type == "boolean":
         return State.BOOL_OPEN
 
-    # not reachable yet, since backslash isn't in the allowed characters
     if state == State.IN_ESCAPE and char in escape_chars:
         return State.IN_STRING
 

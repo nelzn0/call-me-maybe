@@ -169,8 +169,7 @@ Available functions:
 {functions_text}<|im_end|>
 <|im_start|>user
 {user_prompt}<|im_end|>
-<|im_start|>assistant
-{{"name": "function_name", "parameters": """
+<|im_start|>assistant\n"""
 
     return prompt
 
