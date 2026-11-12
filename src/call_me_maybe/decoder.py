@@ -48,12 +48,17 @@ TRANSITIONS: dict[State, dict[str, State]] = {
 
 escape_chars = '"\\/bfnrt'
 
+# letters, punctuation, space and digits. backslash is removed since escapes
+# are not supported. the quote is removed from allowed_in_string, since it
+# would end the string value early
 vocab_chars = (
     string.ascii_letters + string.punctuation + ' ' + string.digits
 ).replace('\\', '')
 allowed_in_string = vocab_chars.replace('"', '')
 
 
+# key is (state, text, options, param_type). each state fills only the slots
+# it reads, the others stay None
 CACHE_TYPE = dict[tuple[State, str | None,
                         tuple[str, ...] | None, str | None], set[int]]
 
@@ -166,22 +171,11 @@ def next_state(
     if state == State.F_PARAM:
         # skip past the function name, so we only look at the text after it
         after_func_name = find_after_name(generated_so_far, func_name)
-        if after_func_name is None:
-            return None
-
-    if (
-        state == State.F_PARAM
-        and after_func_name is not None
-        and ', "parameters": {' == (after_func_name + char)
-    ):
-        return State.P_OPEN
-
-    if (
-        state == State.F_PARAM
-        and after_func_name is not None
-        and (', "parameters": {'.startswith(after_func_name + char))
-    ):
-        return State.F_PARAM
+        if after_func_name is not None:
+            if ', "parameters": {' == (after_func_name + char):
+                return State.P_OPEN
+            if ', "parameters": {'.startswith(after_func_name + char):
+                return State.F_PARAM
 
     if (
         state in (State.NUM_START, State.NUM_NEGATIVE, State.NUM_INT)
