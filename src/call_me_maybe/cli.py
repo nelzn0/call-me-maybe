@@ -95,12 +95,13 @@ def main() -> None:
 
         results = generate(functions, prompts, args.output, show_result)
 
-        failed = len(prompts) - len(results)
+        failed = sum(1 for r in results if not r.get("name"))
+        success = len(prompts) - failed
 
         print("")
 
         print(colorize(
-            f"\nGeneration complete! {len(results)}/{len(prompts)} "
+            f"\nGeneration complete! {success}/{len(prompts)} "
             "prompts succeeded.", RED if failed else GREEN
         ))
 

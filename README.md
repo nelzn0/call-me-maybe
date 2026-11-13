@@ -34,7 +34,7 @@ uv run python -m src [--functions_definition <file>] [--input <file>] [--output 
 - Input prompts: `data/input/function_calling_tests.json`
 - Output results: `data/output/function_calling_results.json`
 
-The program prints each prompt and its JSON result as it finishes. Errors go to stderr, and the program exits with code 1 if a file fails or any prompt fails. The output file still gets the prompts that succeeded.
+The program prints each prompt and its JSON result as it finishes. Errors go to stderr, and the program exits with code 1 if a file fails or any prompt fails. The output file gets one entry for every prompt, including failed ones, so the answers stay in the same order as the tests.
 
 ### Example
 
@@ -74,7 +74,7 @@ The state is stored in an explicit variable and updated after every token by `wa
 5. **After the key:** a colon, then a space or `{`, then `{`.
 6. **Parameter names:** the letters of the valid parameter names for the
    chosen function. Once a name is closed, a colon is allowed, and that name is removed from the list so it can't be used again. The closing quote must be the last character of its token.
-7. **Parameter values:** the type comes from the schema. `number` allows digits, `-`, and one `.`. `string` opens with `"` and uses the precomputed vocabulary list. `boolean` must spell `true` or `false`.
+7. **Parameter values:** the type comes from the schema. `integer` allows digits and `-`, but no `.`. `number` allows digits, `-`, and one `.`, and it needs digits after the `.`. `string` opens with `"` and uses the precomputed vocabulary list. `boolean` must spell `true` or `false`.
 8. **After a value:** a `,` is allowed only while parameter names are left, and a `}` only after all of them are used.
 
 ### State Diagram
@@ -209,6 +209,8 @@ A backslash inside a string moves to `IN_ESCAPE`, and the next character must be
                                     | '}' --> P_CLOSE
 ```
 
+For `number`, `NUM_INT` doesn't accept `,` or `}`, so the value has to go through `NUM_DECIMAL` first. For `integer`, `NUM_INT` rejects `.`.
+
 **Boolean value**:
 
 ```
@@ -274,15 +276,23 @@ Used Pydantic models to validate input JSON files at load time. This catches mal
 
 Each parameter name can be used once per call. The name is taken out of `options` when its closing quote is done, so the model can't repeat it. Commas and closing braces are checked against the names that are left: a `,` needs at least one name left, and a `}` needs none. Without these rules, the model could keep adding parameters until it hit the token limit, or close the object before all the required arguments were written.
 
+Each parameter's type from the schema also decides which characters are allowed. `integer` takes digits and `-`, and a `.` is rejected. `number` takes digits, `-`, and a `.`, and it needs at least one digit after the `.`. `string` and `boolean` follow the rules in the Current Implementation section.
+
 ### Error Handling
 
-Each prompt is handled on its own. If `generate_call()` raises a `ValueError` (no valid token, no matching function or parameter, or the JSON is not finished after `MAX_TOKENS`), `generate()` prints the prompt and the reason, then moves on. `generate()` catches any other error too, so one unexpected error only fails its own prompt. Errors that get past `generate()` are caught in `cli.py`, which prints one line and exits with code 1. The output can therefore have fewer entries than the input.
+Each prompt is handled on its own. If `generate_call()` raises a `ValueError` (no valid token, no matching function or parameter, or the JSON is not finished after `MAX_TOKENS`), `generate()` prints the prompt and the reason, then moves on. `generate()` catches any other error too, so one unexpected error only fails its own prompt. Errors that get past `generate()` are caught in `cli.py`, which prints one line and exits with code 1.
+
+A failed prompt still gets an entry, written as `{"prompt": ..., "name": "", "parameters": {}}`. `cli.py` counts successes by the entries that have a name, so these placeholders are not counted as successes.
 
 `cli.py` handles missing or invalid input files and output write errors. It prints one error line to stderr and exits with code 1.
 
 ### Number Format
 
-Numbers are written as the model produced them (`2` or `2.0`). I didn't convert them to floats, because a float can't hold every big integer exactly.
+The type decides the shape of a number. An `integer` parameter is written as digits only (`2`), and a `number` parameter needs a decimal part (`3.0`). A plain `3` is rejected for a `number` parameter, so the value always reads back as a float.
+
+I still don't convert the values to Python floats in the decoder, because a float can't hold every big integer exactly. The text is kept as the model wrote it, and the type rules above decide which text is valid.
+
+The cache key includes the parameter type. Without it, a result cached for an `integer` could be reused for a `number`, and the two types now allow different characters.
 
 ## Performance Analysis
 
@@ -314,6 +324,10 @@ All 11 outputs were checked by hand against the function schema, and the same ch
 **Problem**: A `"` can open a value, close a value, or be part of the content of a value, and a backslash can turn a quote into content. Counting quotes alone gives the wrong answer when escaped quotes are present.
 
 **Solution**: Backslash is kept in the vocabulary, and `next_state()` has an escape path for `\`. Only `IN_STRING` accepts a backslash, so it can't appear in other states. Each character of a token goes through `next_state()`, so `\"` and `\\` work inside a single token.
+
+The decoder could only allow `\"`. It couldn't make the model write it. In a test with `Say "hello" to {name}`, the model dropped the escapes, so the quotes were not valid inside the string. To fix this, the system prompt has a few-shot example with an escaped quote: `Say \"hi\" to Bob` becomes a `fn_format_template` call. This shows the model to write `\"` inside a string.
+
+The example is written in general form, but it reuses the test's function name, `fn_format_template`, so it is tuned to this test file. If the function names change, the example should change with them.
 
 ### Multi-Character Tokens
 
