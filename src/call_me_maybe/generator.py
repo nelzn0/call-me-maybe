@@ -51,17 +51,22 @@ def load_json_data(
                 out = json.load(f)
                 if not isinstance(out, list):
                     raise ValueError(
-                        f"Error: {file_path} must contain a valid JSON array"
+                        f"{file_path} must contain a valid JSON array"
                     )
-                for i in out:
+                for index, item in enumerate(out, start=1):
                     try:
-                        data = model_class.model_validate(i)
+                        data = model_class.model_validate(item)
                         json_data.append(data)
                     except ValidationError as e:
-                        data_errors.append(f"Error: {e}")
+                        for error in e.errors():
+                            error_text = ".".join(str(p) for p in error["loc"])
+                            data_errors.append(
+                                f"{file_path}: item {index}: "
+                                f"{error_text}: {error['msg']}"
+                            )
             except json.JSONDecodeError as e:
                 raise ValueError(
-                    f"Error: Invalid JSON in file {file_path}: {e}"
+                    f"Invalid JSON in file {file_path}: {e}"
                 )
     except FileNotFoundError:
         raise FileNotFoundError(f"Could not find file {file_path}")
