@@ -65,17 +65,22 @@ allowed next. Every token that isn't allowed gets its logit set to `-inf`, so
 
 The state is stored in an explicit variable and updated after every token by `walk_token()`. Each state allows only the following:
 
-1. **Start:** nothing matches `{"name": "` yet, so only the characters of
-   `{"name": "` are allowed, one at a time.
+1. **Start:** the text `{"name": "` is forced. The model isn't called for it, and the state moves straight to the function name.
 2. **Function name:** the characters of the function names that match the
    text so far. When a name is complete, its closing `"` is allowed.
-3. **After the name:** a comma is allowed, then a space, the quote, or both.
-4. **Parameters key:** the letters of `parameters`, then its closing quote.
+3. **After the name:** the text `, "parameters": {` is forced once the name's closing quote is done.
+4. **Parameters key:** nothing to choose here, since the forced text above already covers `"parameters": {`.
 5. **After the key:** a colon, then a space or `{`, then `{`.
 6. **Parameter names:** the letters of the valid parameter names for the
    chosen function. Once a name is closed, a colon is allowed, and that name is removed from the list so it can't be used again. The closing quote must be the last character of its token.
 7. **Parameter values:** the type comes from the schema. `integer` allows digits and `-`, but no `.`. `number` allows digits, `-`, and one `.`, and it needs digits after the `.`. `string` opens with `"` and uses the precomputed vocabulary list. `boolean` must spell `true` or `false`.
 8. **After a value:** a `,` is allowed only while parameter names are left, and a `}` only after all of them are used.
+
+### Forced Text and Shorter Prompt
+
+The fixed parts of the JSON, `{"name": "` and `, "parameters": {`, never change. Asking the model for them only costs time, so `force_text()` adds them directly. The text is encoded to token IDs and walked through `walk_token()`, so the state moves the same way it would if the model had picked those tokens. If the state machine rejects the text, `force_text()` raises a `ValueError`.
+
+The model re-reads the whole prompt for each token it writes. Once the function name is picked, the prompt is rebuilt with only that function, and the other function definitions are no longer sent. The output built so far is kept, so the JSON carries on from where it was.
 
 ### State Diagram
 
@@ -300,7 +305,7 @@ The cache key includes the parameter type. Without it, a result cached for an `i
 All 11 prompts in `data/input/function_calling_tests.json` produce a function name and parameters from the schema, and by inspection the chosen functions match the prompts. There is no expected-output file to score against, so the outputs were compared with the earlier run, and they matched exactly. This is a small test set, so it doesn't show accuracy on other prompts.
 
 ### Speed
-Measured on a GTX 1650, including model loading. The 11 prompts take about 4:10 to 4:20 with `make run`, under the subject's 5-minute target. Earlier versions took 5:13 to 6:02. `nvidia-smi` showed the GPU at 99% utilization, so the forward pass over the full prompt is the main cost.
+Measured on a GTX 1650, including model loading. The 11 prompts take about 4:10 to 4:20 with `make run`, under the subject's 5-minute target. Earlier versions took 5:13 to 6:02. After forcing the fixed JSON parts and shortening the prompt after the function name, one run took about 2:33, and the output matched the earlier run exactly. `nvidia-smi` showed the GPU at 99% utilization, so the forward pass over the full prompt is the main cost.
 
 ### Reliability
 All 11 outputs were checked by hand against the function schema, and the same checks were run automatically with a validation script. All 11 outputs pass. This is measured on the test file only.

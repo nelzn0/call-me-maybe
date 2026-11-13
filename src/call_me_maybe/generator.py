@@ -280,18 +280,63 @@ def capture_function_name(
     return chosen_func
 
 
+def force_text(
+    llm_model: Small_LLM_Model,
+    text: str,
+    output_ids: list[int],
+    state: State,
+    options: list[str],
+    param_type: str | None,
+    func_name: str | None,
+) -> tuple[list[int], State]:
+    """Adds a fixed piece of text to the output without asking the model.
+
+    The text is encoded to token IDs and walked through walk_token, so the
+    state still moves the same way it would if the model had picked those
+    tokens. Used for the parts of the JSON that never change, like
+    '{"name": "' and ', "parameters": {'.
+
+    Args:
+        llm_model: The model we're generating with, used to encode the text
+        text: The fixed text to add
+        output_ids: The token IDs generated so far
+        state: The state before the text
+        options: The names we can pick from
+        param_type: The type of the current parameter
+        func_name: The chosen function's name, if we have one
+
+    Returns:
+        The token IDs with the forced ones added, and the state after them
+
+    Raises:
+        ValueError: If the state machine rejects the text
+    """
+
+    forced_ids = llm_model.encode(text)[0].tolist()
+    generated_text = llm_model.decode(output_ids)
+    new_state = walk_token(
+        state, text, generated_text, options, param_type, func_name
+    )
+    if new_state is None:
+        raise ValueError(f"Could not force {text}")
+    return output_ids + forced_ids, new_state
+
+
 def generate_call(
     llm_model: Small_LLM_Model,
     vocab: dict[str, int],
     vocab_invert: dict[int, str],
     func_defs: list[FunctionDefinition],
     prompt: str,
-    cache: CACHE_TYPE
+    cache: CACHE_TYPE,
+    user_prompt: str
 ) -> dict[str, Any]:
     """Runs the token loop for one prompt and returns the parsed JSON.
 
     Each parameter name is removed from options once its closing quote is
-    done, so a name can't be used twice in the same call.
+    done, so a name can't be used twice in the same call. Once the function
+    name is picked, the prompt is rebuilt with only that function, so the
+    other function definitions are no longer sent to the model.
 
     Args:
         llm_model: The model we're generating with
@@ -300,6 +345,8 @@ def generate_call(
         func_defs: The function definitions to pick from
         prompt: The full prompt, from build_prompt
         cache: saved results from get_allowed_tokens
+        user_prompt: The question the user asked, used to rebuild the
+            prompt with only the chosen function
 
     Returns:
         The JSON object the model built, as a dict
@@ -317,6 +364,11 @@ def generate_call(
     func_name = None
     state = State.F_START
     param_type = None
+
+    output_ids, state = force_text(
+        llm_model, '{"name": "', output_ids, state,
+        options, param_type, func_name
+    )
 
     for _ in range(MAX_TOKENS):
 
@@ -359,6 +411,10 @@ def generate_call(
                     raise ValueError("Unable to find chosen function")
                 func_name = chosen_func.name
                 options = list(chosen_func.parameters.keys())
+                short_prompt = build_prompt(
+                    build_functions_text([chosen_func]), user_prompt
+                )
+                input_ids = llm_model.encode(short_prompt)[0].tolist()
             # the parameter name is done, so look up its type
             # in the functions definition
             if state == State.P_NAME and new_state == State.P_COLON:
@@ -380,6 +436,12 @@ def generate_call(
             raise ValueError("No new states found")
 
         output_ids.append(best_token_id)
+
+        if state == State.F_PARAM:
+            output_ids, state = force_text(
+                llm_model, ', "parameters": {', output_ids, state,
+                options, param_type, func_name
+            )
 
         generated_text = llm_model.decode(output_ids)
 
@@ -437,8 +499,8 @@ def generate(
             # prompt goes first so it's the first key in the output
             entry["prompt"] = current_input.prompt
             parsed_result = generate_call(
-                llm_model, vocab, vocab_invert, func_defs, prompt, cache
-            )
+                llm_model, vocab, vocab_invert, func_defs, prompt, cache,
+                current_input.prompt)
             entry.update(parsed_result)
             final_result.append(entry)
             # the caller decides how to show each result
