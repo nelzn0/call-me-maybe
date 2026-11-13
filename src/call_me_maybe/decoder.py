@@ -158,7 +158,11 @@ def next_state(
     ):
         return State.P_NAME
 
-    if state == State.NUM_INT and char in (',', '}') and param_type == "number":
+    if (
+        state == State.NUM_INT
+        and char in (',', '}')
+        and param_type == "number"
+    ):
         return None
     if state == State.NUM_INT and char == '.' and param_type == "integer":
         return None
@@ -218,7 +222,11 @@ def next_state(
     if state == State.P_COLON and char == ':' and param_type == "string":
         return State.STR_OPEN
 
-    if state == State.P_COLON and char == ':' and param_type in ("number", "integer"):
+    if (
+        state == State.P_COLON
+        and char == ':'
+        and param_type in ("number", "integer")
+    ):
         return State.NUM_START
 
     if state == State.P_COLON and char == ':' and param_type == "boolean":
@@ -397,22 +405,31 @@ def get_allowed_tokens(
     # states that don't read these inputs leave them as None
     if state == State.F_START:
         text = generated_so_far
+
     elif state in (State.F_NAME, State.P_NAME):
         text = text_after_last_quote(generated_so_far)
         key_options = tuple(options)
+
     elif state == State.F_PARAM:
         text = find_after_name(generated_so_far, func_name)
         key_options = tuple(options)
+
     elif state == State.P_COLON:
         key_type = param_type
+
     elif state == State.IN_BOOL:
         b_find = generated_so_far.rfind(':')
         text = generated_so_far[b_find + 1:].strip()
-    elif state in (State.NUM_START, State.NUM_NEGATIVE, State.NUM_DECIMAL_POINT):
+
+    elif state in (State.NUM_START,
+                   State.NUM_NEGATIVE,
+                   State.NUM_DECIMAL_POINT):
         key_type = param_type
+
     elif state in (State.P_AFTER_VALUE, State.NUM_INT, State.NUM_DECIMAL):
         key_options = tuple(options)
         key_type = param_type
+
     elif state in (State.IN_STRING, State.P_NEXT, State.P_OPEN):
         key_options = tuple(options)
 

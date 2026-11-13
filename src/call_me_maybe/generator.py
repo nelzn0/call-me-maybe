@@ -166,8 +166,8 @@ def build_prompt(functions_text: str, user_prompt: str) -> str:
 
     prompt = f"""<|im_start|>system
 Respond ONLY with a JSON object
-Respond ONLY with a JSON object
-Example: user "Say \\"hi\\" to Bob" -> {{"name": "fn_format_template", "parameters": {{"template": "Say \\"hi\\" to Bob"}}}}
+Example: user "Say \\"hi\\" to Bob" -> {{"name": "fn_format_template", \
+"parameters": {{"template": "Say \\"hi\\" to Bob"}}}}
 Available functions:
 {functions_text}<|im_end|>
 <|im_start|>user
@@ -426,7 +426,7 @@ def generate(
 
     functions = build_functions_text(func_defs)
 
-    final_result = []
+    final_result: list[dict[str, Any]] = []
     total = len(prompts)
 
     for index, current_input in enumerate(prompts, start=1):
@@ -455,7 +455,9 @@ def generate(
                 ),
                 file=sys.stderr
             )
-            final_result.append({"prompt": current_input.prompt, "name": "", "parameters": {}})
+            final_result.append(
+                {"prompt": current_input.prompt, "name": "", "parameters": {}}
+            )
 
         write_result(output_path, final_result)
 
