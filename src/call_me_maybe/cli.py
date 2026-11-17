@@ -62,7 +62,7 @@ def main() -> None:
 
     parser.add_argument(
         "--output",
-        default="data/output/function_calling_results.json",
+        default="data/output/function_calls.json",
         help="JSON file to write the results to",
     )
 
